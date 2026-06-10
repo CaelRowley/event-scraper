@@ -1,0 +1,127 @@
+# Bilingual (DE/EN) keyword rules. A rule family fires only when it is the SINGLE
+# matching family on title+description — multi-match goes to the LLM tier.
+# Word-boundary regexes; case-insensitive. Versioned so reclassification is replayable.
+version: 1
+families:
+  live_music:
+    - konzert
+    - live[- ]?musik
+    - "live: "
+    - gig\b
+    - unplugged
+    - akustik(?:abend|konzert)
+    - support[:]? # tour support acts
+    - tournee|tour \d{4}
+  club_nightlife:
+    - party
+    - rave
+    - clubnacht
+    - club night
+    - dj[- ]?set
+    - djs?\b
+    - techno|house music|drum ?& ?bass|dnb\b
+    - afterhour
+    - open decks
+  theatre_performance:
+    - premiere
+    - bühne|buehne
+    - theater(?!haus)|theatre
+    - schauspiel
+    - tanzstück|tanzstueck
+    - ballett|ballet
+    - oper\b|opera
+    - performance(?:kunst)?
+    - puppentheater
+  comedy:
+    - comedy
+    - stand[- ]?up
+    - kabarett
+    - impro(?:visations)?[- ]?(?:show|theater|comedy)
+    - open mic comedy
+  art_exhibitions:
+    - ausstellung
+    - vernissage
+    - finissage
+    - galerie|gallery
+    - exhibition
+    - kunstwerke?\b
+    - museumsnacht
+  film_cinema:
+    - kino
+    - filmvorführung|filmvorfuehrung
+    - screening
+    - kurzfilm
+    - open[- ]?air[- ]?kino
+    - dokumentarfilm
+  talks_literature:
+    - lesung
+    - vortrag
+    - talk\b
+    - panel
+    - diskussion
+    - buchpremiere
+    - poetry ?slam
+    - autorenlesung
+  workshops_classes:
+    - workshop
+    - kurs\b
+    - seminar
+    - tanzkurs
+    - masterclass
+    - schreibwerkstatt
+  markets_fairs:
+    - flohmarkt
+    - trödelmarkt|troedelmarkt
+    - markt\b
+    - designmarkt
+    - messe\b
+    - basar|bazaar
+    - fair\b
+  food_drink:
+    - tasting
+    - verkostung
+    - weinprobe
+    - street ?food
+    - brunch
+    - dinner\b
+    - kulinarisch
+  festivals:
+    - festival
+    - festspiele
+  sports_fitness:
+    - lauf\b|marathon
+    - yoga
+    - turnier
+    - spieltag
+    - bouldern|klettern
+    - fitness
+  family_kids:
+    - kinder\b
+    - familien?\b
+    - puppenshow
+    - märchen|maerchen
+    - mitmach
+  community_causes:
+    - meetup
+    - netzwerk(?:en|treffen)|networking
+    - demo(?:nstration)?\b
+    - kundgebung
+    - kiezfest
+    - gottesdienst
+    - stammtisch
+    - hackathon
+# Tag rules are additive — they never decide the category.
+tags:
+  open-air:
+    - open[- ]?air
+    - draußen|draussen
+    - unter freiem himmel
+  family-friendly:
+    - familienfreundlich
+    - für die ganze familie
+    - kinder willkommen
+  queer:
+    - queer
+    - lgbtq?
+    - drag\b
+    - csd\b

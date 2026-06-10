@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Berlin Events — scraper demo</title>
+<style>
+  :root {
+    --bg: #101418; --panel: #1a2128; --panel2: #222b34; --text: #e8e6e1;
+    --muted: #8a949e; --accent: #e4b34a; --accent2: #4ab3e4; --line: #2e3942;
+    --green: #5dbb7a; --red: #d96a6a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; }
+  header { padding: 28px 20px 10px; max-width: 1060px; margin: 0 auto; }
+  h1 { font: 600 26px/1.2 Georgia, "Times New Roman", serif; margin: 0 0 4px; }
+  h1 em { color: var(--accent); font-style: italic; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 1060px; margin: 0 auto; padding: 0 20px 60px; }
+  .bar { position: sticky; top: 0; background: var(--bg); padding: 14px 0 10px; z-index: 5;
+         border-bottom: 1px solid var(--line); }
+  .days, .cats { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+  .chip { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+          border-radius: 999px; padding: 5px 13px; font-size: 13px; cursor: pointer;
+          white-space: nowrap; flex: 0 0 auto; }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { background: var(--accent); color: #14110a; border-color: var(--accent); font-weight: 600; }
+  .cats { margin-top: 8px; }
+  .cats .chip.on { background: var(--accent2); border-color: var(--accent2); }
+  .count { color: var(--muted); font-size: 12px; margin: 12px 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          overflow: hidden; display: flex; flex-direction: column; text-decoration: none;
+          color: var(--text); transition: border-color .15s, transform .15s; }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .thumb { height: 130px; background: var(--panel2); display: flex; align-items: center;
+           justify-content: center; font-size: 34px; overflow: hidden; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .cat { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+  .title { font: 600 16px/1.3 Georgia, serif; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; margin-top: auto; }
+  .price { color: var(--green); font-weight: 600; font-size: 13px; }
+  .price.unknown { color: var(--muted); font-weight: 400; }
+  .src { color: var(--muted); font-size: 11px; }
+  .tag { display: inline-block; background: var(--panel2); border-radius: 4px; padding: 1px 6px;
+         font-size: 11px; color: var(--accent2); margin-right: 4px; }
+  .cancelled .title { text-decoration: line-through; }
+  .cancelled .cat::after { content: " · cancelled"; color: var(--red); }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  footer { max-width: 1060px; margin: 0 auto; padding: 20px; color: var(--muted); font-size: 12px;
+           border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Berlin <em>tonight &amp; beyond</em></h1>
+  <div class="sub" id="meta">loading feed…</div>
+</header>
+<main>
+  <div class="bar">
+    <div class="days" id="days"></div>
+    <div class="cats" id="cats"></div>
+  </div>
+  <div class="count" id="count"></div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" hidden>No events match — try another day or category.</div>
+</main>
+<footer>
+  Demo for the event-scraper pipeline. Every card links to the original listing — data remains
+  the property of its sources. Generated from <code>berlin/index.json</code>.
+</footer>
+<script>
+const ICONS = {
+  live_music:"🎸", club_nightlife:"🪩", theatre_performance:"🎭", comedy:"🎤",
+  art_exhibitions:"🖼️", film_cinema:"🎬", talks_literature:"📖", workshops_classes:"🛠️",
+  markets_fairs:"🛍️", food_drink:"🍷", festivals:"🎪", sports_fitness:"🏃",
+  family_kids:"🧸", community_causes:"🤝", other:"✨"
+};
+let DATA = null, day = "all", cat = "all";
+
+const fmtDay = iso => new Date(iso + "T12:00:00").toLocaleDateString("en-GB",
+  { weekday: "short", day: "numeric", month: "short" });
+const fmtTime = (item) => {
+  if (item.time_unknown) return "time tba";
+  return new Date(item.starts_at_local).toLocaleTimeString("de-DE",
+    { hour: "2-digit", minute: "2-digit" });
+};
+const fmtPrice = p => {
+  if (!p || p.type === "unknown") return ["?", true];
+  if (p.is_free || p.type === "free") return ["free", false];
+  if (p.type === "donation") return ["donation", false];
+  if (p.type === "from") return [`from ${p.min} €`, false];
+  if (p.type === "range") return [`${p.min}–${p.max} €`, false];
+  return [`${p.min} €`, false];
+};
+
+async function load() {
+  const res = await fetch("berlin/index.json");
+  DATA = await res.json();
+  document.getElementById("meta").textContent =
+    `${DATA.meta.total} events · ${DATA.meta.window.from} → ${DATA.meta.window.to} · generated ${DATA.meta.generated_at}`;
+  buildChips();
+  render();
+}
+
+function buildChips() {
+  const days = [...new Set(DATA.events.map(e => e.nightlife_date))].sort();
+  const dayBox = document.getElementById("days");
+  dayBox.innerHTML = "";
+  dayBox.append(chip("All days", "all", v => { day = v; render(); }, () => day));
+  for (const d of days) dayBox.append(chip(fmtDay(d), d, v => { day = v; render(); }, () => day));
+
+  const counts = DATA.meta.by_category;
+  const catBox = document.getElementById("cats");
+  catBox.innerHTML = "";
+  catBox.append(chip("All", "all", v => { cat = v; render(); }, () => cat));
+  for (const [slug, n] of Object.entries(counts)) {
+    const label = DATA.events.find(e => e.category === slug)?.category_label || slug;
+    catBox.append(chip(`${ICONS[slug] || ""} ${label} (${n})`, slug, v => { cat = v; render(); }, () => cat));
+  }
+}
+
+function chip(label, value, onpick, current) {
+  const b = document.createElement("button");
+  b.className = "chip" + (current() === value ? " on" : "");
+  b.textContent = label;
+  b.onclick = () => { onpick(value); };
+  return b;
+}
+
+function render() {
+  buildChips();
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  const items = DATA.events.filter(e =>
+    (day === "all" || e.nightlife_date === day) && (cat === "all" || e.category === cat));
+  document.getElementById("count").textContent = `${items.length} events`;
+  document.getElementById("empty").hidden = items.length > 0;
+  for (const item of items) grid.append(card(item));
+}
+
+function card(item) {
+  const a = document.createElement("a");
+  a.className = "card" + (item.event_status === "cancelled" ? " cancelled" : "");
+  a.href = item.source_url; a.target = "_blank"; a.rel = "noopener";
+  const icon = ICONS[item.category] || "✨";
+  const [priceLabel, priceUnknown] = fmtPrice(item.price);
+  const when = item.is_range
+    ? `until ${item.range_end}`
+    : `${fmtDay(item.nightlife_date)} · ${fmtTime(item)}`;
+  a.innerHTML = `
+    <div class="thumb">${item.image_url
+      ? `<img src="${item.image_url}" loading="lazy" alt=""
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${icon}'}))">`
+      : icon}</div>
+    <div class="body">
+      <span class="cat">${item.category_label}</span>
+      <span class="title"></span>
+      <span class="meta when"></span>
+      <span class="meta venue"></span>
+      <span>${(item.tags || []).map(t => `<span class="tag">${t}</span>`).join("")}</span>
+      <span class="row">
+        <span class="price${priceUnknown ? " unknown" : ""}">${priceLabel}</span>
+        <span class="src">${item.source} ↗</span>
+      </span>
+    </div>`;
+  a.querySelector(".title").textContent = item.title;
+  a.querySelector(".when").textContent = when;
+  a.querySelector(".venue").textContent = item.venue_name || (item.address?.street ?? "");
+  return a;
+}
+
+load().catch(err => {
+  document.getElementById("meta").textContent = "failed to load berlin/index.json — " + err;
+});
+</script>
+</body>
+</html>
