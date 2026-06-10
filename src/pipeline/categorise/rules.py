@@ -80,3 +80,32 @@ def classify(ev: Event, *, source_prior: str | None = None,
         return Classification(hits[0], 0.7, "keyword", tags)
 
     return None  # ambiguous (0 or 2+ families) → tier 3 LLM queue
+
+
+# Tie-break preference for rules-only mode, most-specific first: when "Konzert +
+# Aftershow-Party" matches two families with equal counts, prefer the earlier entry.
+FAMILY_PRIORITY = [
+    "comedy", "film_cinema", "markets_fairs", "talks_literature", "workshops_classes",
+    "art_exhibitions", "theatre_performance", "family_kids", "sports_fitness",
+    "food_drink", "live_music", "club_nightlife", "festivals", "community_causes",
+]
+
+
+def classify_best_effort(ev: Event, *, source_prior: str | None = None,
+                         mapped_category: str | None = None,
+                         venue_prior: str | None = None) -> Classification | None:
+    """Rules-only mode: like classify(), but multi-family keyword matches are resolved
+    by match count (priority order breaks ties) instead of being deferred to the LLM.
+    Low confidence + its own tier, so the AI tier can upgrade these later."""
+    cls = classify(ev, source_prior=source_prior, mapped_category=mapped_category,
+                   venue_prior=venue_prior)
+    if cls is not None:
+        return cls
+    text = f"{ev.title} {ev.description or ''}"
+    families, _ = _compiled()
+    scores = {cat: len(rx.findall(text)) for cat, rx in families.items()}
+    scores = {cat: n for cat, n in scores.items() if n}
+    if not scores:
+        return None  # zero signal — stays "other" either way
+    best = max(scores, key=lambda c: (scores[c], -FAMILY_PRIORITY.index(c)))
+    return Classification(best, 0.5, "keyword_multi", keyword_tags(text))

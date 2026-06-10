@@ -23,6 +23,22 @@ rules** (`src/pipeline/categorise/keywords.yaml`) → **Claude Haiku batch** for
 ambiguous remainder (Message Batches API, strict JSON-schema output, ~$0.28 per
 1,000 events; `confidence < 0.6` falls back to `other`).
 
+### Two categorisation modes
+
+The mode is selected automatically — no config beyond the API key:
+
+- **rules mode** (no `ANTHROPIC_API_KEY` set, or `--no-llm`): everything above except
+  the Haiku tier. Ambiguous keyword matches are resolved by match count instead of
+  deferred (tier `keyword_multi`, confidence 0.5); zero-signal events stay `other`.
+  $0 to run — start here.
+- **ai mode** (key present): identical, except ambiguous/zero-signal events go to the
+  nightly Haiku batch and get upgraded in place — including everything rules mode
+  guessed at or gave up on in *earlier* runs (the queue persists across runs).
+
+So the upgrade path is exactly: run rules-only as long as you like, then add the
+`ANTHROPIC_API_KEY` secret and the next run reclassifies the backlog. Telemetry
+reports the active mode as `categorisation_mode`.
+
 ## Sources (Berlin)
 
 | source | access | notes |

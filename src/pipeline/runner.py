@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 from collections import Counter
 
+import os
+
 from . import config as cfg
 from .categorise.llm import run_llm_tier
-from .categorise.rules import classify
+from .categorise.rules import classify, classify_best_effort
 from .db import connect, queue_for_llm, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
@@ -21,6 +23,10 @@ log = logging.getLogger(__name__)
 def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None = None,
         limit: int | None = None, no_llm: bool = False, llm_poll: int = 1200,
         db_path: str | None = None) -> dict:
+    # Two categorisation modes: "ai" when a key is present (and not opted out),
+    # "rules" otherwise. Rules mode classifies as best it can (keyword_multi tier)
+    # and still queues those events, so adding ANTHROPIC_API_KEY later upgrades them.
+    ai_enabled = not no_llm and bool(os.environ.get("ANTHROPIC_API_KEY"))
     city = cfg.CITIES[city_slug]
     conn = connect(db_path or cfg.DB_PATH)
     seed_venues(conn)
@@ -41,7 +47,8 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
                 if ev is None:
                     continue
                 ev.venue_id, venue_prior = venue_index.resolve(ev.venue_name)
-                cls = classify(
+                classifier = classify if ai_enabled else classify_best_effort
+                cls = classifier(
                     ev,
                     source_prior=adapter.category_prior,
                     mapped_category=adapter.map_category(raw),
@@ -60,7 +67,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
                     if changed or current_tier != "llm":
                         set_category(conn, eid, cls.category, cls.tier, cls.confidence, cls.tags)
                         tier_counts[cls.tier] += 1
-                elif changed or current_tier == "fallback_other":
+                    if cls.tier == "keyword_multi" and current_tier != "llm":
+                        # best-effort guess — queue so the AI tier upgrades it later
+                        queue_for_llm(conn, eid)
+                        if ev.description:
+                            descriptions[eid] = ev.description
+                elif changed or current_tier in ("fallback_other", "keyword_multi"):
                     queue_for_llm(conn, eid)
                     if ev.description:
                         descriptions[eid] = ev.description
@@ -75,7 +87,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     conn.commit()
 
     llm_stats = {}
-    if not no_llm:
+    if ai_enabled:
         llm_stats = run_llm_tier(conn, descriptions, poll_seconds=llm_poll)
         conn.commit()
 
@@ -83,6 +95,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
 
     queue_size = conn.execute("SELECT COUNT(*) AS n FROM llm_queue").fetchone()["n"]
     telemetry = {
+        "categorisation_mode": "ai" if ai_enabled else "rules",
         "sources": dict(source_counts),
         "errors": errors,
         "category_tiers": dict(tier_counts),
