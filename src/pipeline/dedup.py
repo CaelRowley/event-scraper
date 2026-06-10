@@ -113,6 +113,7 @@ def _is_match(a: dict, b: dict) -> tuple[bool, float, float]:
 
 
 def run_dedup(conn, city: str) -> dict:
+    conn.execute("DELETE FROM dedup_near_misses")  # per-run review artifact
     blocks = _candidates(conn, city)
     uf = _UnionFind()
     members: dict[str, dict] = {}

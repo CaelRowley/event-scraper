@@ -52,6 +52,13 @@ TAG_MAP = {
     "Youth": "family_kids",
     "Sports": "sports_fitness",
     "Food": "food_drink",
+    # observed in run telemetry 2026-06-10:
+    "Stages": "theatre_performance",
+    "Politics": "community_causes",
+    "InformationEvents": "community_causes",
+    "Health": "community_causes",
+    "Police": "community_causes",
+    # "Recreation" and "Walks" stay unmapped — too generic; keywords/LLM decide
 }
 
 CACHE_SCHEMA = """
