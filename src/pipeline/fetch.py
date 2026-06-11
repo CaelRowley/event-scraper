@@ -126,6 +126,16 @@ class Fetcher:
             headers["User-Agent"] = user_agent
         return self._send("GET", url, headers=headers, **kwargs)
 
+    def head(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
+             check_robots: bool = True, **kwargs) -> httpx.Response:
+        if check_robots and not self.allowed(url, user_agent):
+            raise PermissionError(f"robots.txt disallows {url}")
+        self._throttle(url, rate)
+        headers = dict(kwargs.pop("headers", {}))
+        if user_agent:
+            headers["User-Agent"] = user_agent
+        return self._send("HEAD", url, headers=headers, **kwargs)
+
     def post(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
              check_robots: bool = True, **kwargs) -> httpx.Response:
         if check_robots and not self.allowed(url, user_agent):

@@ -91,6 +91,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "description" not in cols:
         # public description for open-licensed sources only (CC-BY kulturdaten etc.)
         conn.execute("ALTER TABLE events ADD COLUMN description TEXT")
+    if "link_dead_at" not in cols:
+        # set when the source link is confirmed dead; excluded from export, never deleted
+        conn.execute("ALTER TABLE events ADD COLUMN link_dead_at TEXT")
 
 
 # --- crawl ledger -----------------------------------------------------------
@@ -219,6 +222,7 @@ def feed_rows(conn, city: str, date_from: str, date_to: str) -> list[sqlite3.Row
            WHERE e.city = ? AND e.canonical_id = e.id
              AND o.nightlife_date >= ? AND o.nightlife_date <= ?
              AND e.attendance_mode != 'online'
+             AND e.link_dead_at IS NULL
            ORDER BY o.starts_at_utc""",
         (city, date_from, date_to),
     ).fetchall()

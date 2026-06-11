@@ -15,6 +15,7 @@ from .dedup import run_dedup
 from .export import export_city
 from .fetch import Fetcher
 from .images import backfill_images
+from .linkcheck import check_links
 from .normalise.convert import to_event
 from .venues import VenueIndex, seed_venues
 
@@ -90,6 +91,9 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     image_stats = backfill_images(conn, fetcher, city.slug)
     conn.commit()
 
+    link_stats = check_links(conn, fetcher, city.slug)
+    conn.commit()
+
     llm_stats = {}
     if ai_enabled:
         llm_stats = run_llm_tier(conn, descriptions, poll_seconds=llm_poll)
@@ -105,6 +109,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,
+        "links": link_stats,
         "llm": llm_stats,
         "llm_queue_remaining": queue_size,
         "export": export_stats,

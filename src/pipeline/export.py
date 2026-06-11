@@ -57,6 +57,7 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
            WHERE e.city = ? AND e.canonical_id = e.id
              AND o.nightlife_date >= ? AND o.nightlife_date <= ?
              AND e.attendance_mode != 'online'
+             AND e.link_dead_at IS NULL
            ORDER BY o.starts_at_utc""",
         (city, date_from, date_to),
     ).fetchall()

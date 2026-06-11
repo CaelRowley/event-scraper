@@ -91,6 +91,15 @@ robots-checked, ~150 pages/run) and the best image is pulled from JSON-LD →
 to every event sharing that URL (recurring exhibitions), so coverage compounds across
 runs. RA flyers come straight from its GraphQL `images[]` field — no scanning.
 
+### Dead-link removal
+
+Feed events' source links are re-verified every ~3 days (~250 checks/run, HEAD with
+GET confirmation). Only hard 404/410 counts — blocks (403/429), server errors, and
+timeouts are inconclusive, and ra.co is never checked (it blocks non-browser clients;
+its GraphQL API is the liveness signal there). An event is pulled from the feed after
+**two** dead strikes ≥20 h apart; it's flagged (`link_dead_at`), not deleted, and if it
+headed a dedup cluster a surviving source is promoted so the event stays listed.
+
 ## Data & legal posture
 
 Facts only (title/date/venue/price), never editorial prose; every exported item links
