@@ -27,6 +27,7 @@ query($filters:FilterInputDtoInput,$pageSize:Int,$page:Int){
   eventListings(filters:$filters,pageSize:$pageSize,page:$page){
     data{ id listingDate event{
       id title contentUrl startTime endTime cost isTicketed flyerFront
+      images{ filename type }
       venue{ id name contentUrl area{name} location{latitude longitude} }
     }}
     totalResults
@@ -92,7 +93,10 @@ class ResidentAdvisorAdapter(SourceAdapter):
                 price_value = float(cost.replace(",", "."))
             except ValueError:
                 pass
-        flyer = ev.get("flyerFront")
+        # flyerFront is usually null in listings; images[] carries full URLs (verified)
+        images = ev.get("images") or []
+        flyer = next((i.get("filename") for i in images if i.get("type") == "FLYERFRONT"), None) \
+            or next((i.get("filename") for i in images), None) or ev.get("flyerFront")
         if flyer and not flyer.startswith("http"):
             flyer = f"https://imgproxy.ra.co/_/quality:66/{flyer}"
 

@@ -27,8 +27,10 @@ from .jsonld_common import jsonld_to_raw
 log = logging.getLogger(__name__)
 
 BASE = "https://www.livegigs.de"
-# detail pages: /events/<slug>-<id> (day pages) or /{section}/{slug}/{venue}/{date} (featured)
-DETAIL_RE = re.compile(r"^/events/[a-z0-9-]+-\d+$|^/[^/]+/[^/]+/[^/]+/\d{4}-\d{2}-\d{2}$")
+# detail pages: /{section}/{slug}/berlin-{venue}/{date}. The venue segment is
+# city-prefixed — requiring "berlin-" skips the nationwide top-events block, whose
+# bare /events/<id> links are mostly other cities (each costs a fetch to find out).
+DETAIL_RE = re.compile(r"^/[^/]+/[^/]+/berlin-[^/]+/\d{4}-\d{2}-\d{2}$")
 DETAIL_BUDGET = 150
 
 
@@ -56,12 +58,13 @@ class LivegigsAdapter(SourceAdapter):
                 continue
             for node in events_from_html(resp.text):
                 raw = jsonld_to_raw(node, source=self.slug, page_url=page_url)
-                if raw and raw.source_event_id not in seen:
-                    seen.add(raw.source_event_id)
-                    yielded += 1
-                    yield raw
-                    if limit and yielded >= limit:
-                        return
+                if raw is None or raw.source_event_id in seen or not self._is_berlin(raw):
+                    continue
+                seen.add(raw.source_event_id)
+                yielded += 1
+                yield raw
+                if limit and yielded >= limit:
+                    return
             detail_links.extend(self._harvest_links(resp.text, page_url))
 
         # detail pages not yet covered by listing JSON-LD, new-first via ledger
@@ -82,12 +85,18 @@ class LivegigsAdapter(SourceAdapter):
             budget -= 1
             for node in events_from_html(resp.text):
                 raw = jsonld_to_raw(node, source=self.slug, page_url=url)
-                if raw and raw.source_event_id not in seen:
-                    seen.add(raw.source_event_id)
-                    yielded += 1
-                    yield raw
-                    if limit and yielded >= limit:
-                        return
+                if raw is None or raw.source_event_id in seen or not self._is_berlin(raw):
+                    continue
+                seen.add(raw.source_event_id)
+                yielded += 1
+                yield raw
+                if limit and yielded >= limit:
+                    return
+
+    @staticmethod
+    def _is_berlin(raw: RawEvent) -> bool:
+        """The /berlin listing also embeds a nationwide top-concerts block — filter it out."""
+        return "berlin" in (raw.city or "").lower()
 
     @staticmethod
     def _harvest_links(html: str, page_url: str) -> list[str]:

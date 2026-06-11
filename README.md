@@ -81,6 +81,16 @@ Other commands: `python -m pipeline export`, `python -m pipeline venues-bootstra
 keep-alive in one), and fails loudly when sources break or yield nothing.
 Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`.
 
+### Image backfill
+
+Sources that don't ship images (kulturdaten, berlin.de, many JSON-LD pages) get a
+backfill pass each run: the event's source page is fetched once ever (ledger-tracked,
+robots-checked, ~150 pages/run) and the best image is pulled from JSON-LD →
+`og:image`/`twitter:image` → largest content `<img>` inside `article`/`main`
+(logo/icon/SVG names rejected, sub-200px images rejected). A found image is applied
+to every event sharing that URL (recurring exhibitions), so coverage compounds across
+runs. RA flyers come straight from its GraphQL `images[]` field — no scanning.
+
 ## Data & legal posture
 
 Facts only (title/date/venue/price), never editorial prose; every exported item links
