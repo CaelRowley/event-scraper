@@ -49,7 +49,8 @@ class RawEvent:
     image_url: str | None = None
     category_raw: str | None = None  # whatever the source said
     schema_type: str | None = None  # JSON-LD @type
-    description: str | None = None  # used for classification only — never exported/stored verbatim
+    description: str | None = None  # classification input; exported only when description_public
+    description_public: bool = False  # True only for open-licensed sources (CC-BY etc.)
     event_status: str = "scheduled"
     attendance_mode: str = "offline"
     extra_starts: list = field(default_factory=list)  # additional occurrence datetimes
@@ -96,7 +97,8 @@ class Event:
     price: Price = field(default_factory=Price)
     image_url: str | None = None
     occurrences: list[Occurrence] = field(default_factory=list)
-    description: str | None = None  # in-memory only, for classification
+    description: str | None = None  # classification input
+    description_public: bool = False  # exported/stored only when True (open-licensed source)
 
     def content_hash(self) -> str:
         """Hash of the normalised payload — gates downstream work on re-crawls."""
@@ -108,6 +110,8 @@ class Event:
             "image": self.image_url,
             "status": self.event_status,
             "range": (self.is_range, self.range_start, self.range_end),
+            # in the hash so a website discovered on a later run replaces an API-record link
+            "url": self.source_url,
         }
         return "sha256:" + hashlib.sha256(
             json.dumps(basis, sort_keys=True, default=str).encode()

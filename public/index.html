@@ -41,6 +41,8 @@
   .cat { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
   .title { font: 600 16px/1.3 Georgia, serif; }
   .meta { color: var(--muted); font-size: 13px; }
+  .desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+          overflow: hidden; font-size: 12.5px; }
   .row { display: flex; justify-content: space-between; align-items: baseline; margin-top: auto; }
   .price { color: var(--green); font-weight: 600; font-size: 13px; }
   .price.unknown { color: var(--muted); font-weight: 400; }
@@ -161,15 +163,18 @@ function card(item) {
       <span class="title"></span>
       <span class="meta when"></span>
       <span class="meta venue"></span>
+      <span class="meta desc"></span>
       <span>${(item.tags || []).map(t => `<span class="tag">${t}</span>`).join("")}</span>
       <span class="row">
         <span class="price${priceUnknown ? " unknown" : ""}">${priceLabel}</span>
-        <span class="src">${item.source} ↗</span>
+        <span class="src">${item.source_is_record ? "data record ⧉" : item.source + " ↗"}</span>
       </span>
     </div>`;
   a.querySelector(".title").textContent = item.title;
   a.querySelector(".when").textContent = when;
   a.querySelector(".venue").textContent = item.venue_name || (item.address?.street ?? "");
+  const desc = a.querySelector(".desc");
+  if (item.description) desc.textContent = item.description; else desc.remove();
   return a;
 }
 

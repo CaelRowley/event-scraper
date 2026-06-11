@@ -82,7 +82,15 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "description" not in cols:
+        # public description for open-licensed sources only (CC-BY kulturdaten etc.)
+        conn.execute("ALTER TABLE events ADD COLUMN description TEXT")
 
 
 # --- crawl ledger -----------------------------------------------------------
@@ -138,14 +146,15 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
                  category,category_tier,category_confidence,tags_json,source_category_raw,
                  is_range,range_start,range_end,event_status,attendance_mode,
                  venue_id,venue_name,address_json,lat,lon,price_json,image_url,content_hash,
-                 first_seen_at,last_seen_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 description,first_seen_at,last_seen_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ev.id, ev.canonical_id, ev.city, ev.source, ev.source_event_id, ev.source_url,
              ev.title, ev.category, ev.category_tier, ev.category_confidence,
              json.dumps(ev.tags), ev.source_category_raw,
              int(ev.is_range), ev.range_start, ev.range_end, ev.event_status, ev.attendance_mode,
              ev.venue_id, ev.venue_name, json.dumps(ev.address), ev.lat, ev.lon,
-             json.dumps(ev.price.to_json()), ev.image_url, new_hash, now, now),
+             json.dumps(ev.price.to_json()), ev.image_url, new_hash,
+             (ev.description if ev.description_public else None), now, now),
         )
         changed = True
     else:
@@ -156,12 +165,13 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
             conn.execute(
                 """UPDATE events SET title=?, source_url=?, is_range=?, range_start=?, range_end=?,
                      event_status=?, attendance_mode=?, venue_id=?, venue_name=?, address_json=?,
-                     lat=?, lon=?, price_json=?, image_url=?, content_hash=?, source_category_raw=?,
-                     last_seen_at=? WHERE id=?""",
+                     lat=?, lon=?, price_json=?, image_url=COALESCE(?, image_url), content_hash=?,
+                     source_category_raw=?, description=?, last_seen_at=? WHERE id=?""",
                 (ev.title, ev.source_url, int(ev.is_range), ev.range_start, ev.range_end,
                  ev.event_status, ev.attendance_mode, ev.venue_id, ev.venue_name,
                  json.dumps(ev.address), ev.lat, ev.lon, json.dumps(ev.price.to_json()),
-                 ev.image_url, new_hash, ev.source_category_raw, now, ev.id),
+                 ev.image_url, new_hash, ev.source_category_raw,
+                 (ev.description if ev.description_public else None), now, ev.id),
             )
     if changed:
         for occ in ev.occurrences:

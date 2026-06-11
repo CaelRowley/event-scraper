@@ -76,6 +76,7 @@ def to_event(raw: RawEvent, city: str, tz_name: str = "Europe/Berlin") -> Event 
         image_url=raw.image_url,
         occurrences=occurrences,
         description=(raw.description or "")[:2000] or None,
+        description_public=raw.description_public,
     )
     if sold_out:
         ev.tags.append("sold-out")

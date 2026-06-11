@@ -38,8 +38,11 @@ def _row_to_item(row) -> dict:
         "geo": {"lat": row["lat"], "lon": row["lon"]} if row["lat"] is not None else None,
         "price": json.loads(row["price_json"] or "{}"),
         "image_url": row["image_url"],
+        "description": row["description"],  # open-licensed sources only (CC-BY)
         "source": row["source_slug"],
         "source_url": row["source_url"],
+        # true when the link is a raw data record, not a human page — UIs should label it
+        "source_is_record": row["source_url"].startswith("https://api-v2.kulturdaten.berlin"),
     }
 
 

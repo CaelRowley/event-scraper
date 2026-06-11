@@ -71,7 +71,7 @@ class KulturdatenAdapter(SourceAdapter):
     slug = "kulturdaten"
     rate = RateSpec(min_interval=0.5, jitter=(0.1, 0.4))
     cheap_delta = True
-    detail_budget = 250  # attraction detail fetches per run; cache converges over runs
+    detail_budget = 600  # attraction detail fetches per run; cache converges over runs
 
     def __init__(self, fetcher, conn):
         super().__init__(fetcher, conn)
@@ -170,10 +170,12 @@ class KulturdatenAdapter(SourceAdapter):
         if entry.get("scheduleStatus") == "event.cancelled":
             status = "cancelled"
 
+        external = next((l.get("url") for l in attr.get("externalLinks") or [] if l.get("url")), None)
         return RawEvent(
             source=self.slug,
             source_event_id=ident,
-            source_url=attr.get("website") or f"{API}/events/{ident}",
+            # human page when the attraction has one; the raw API record only as last resort
+            source_url=attr.get("website") or external or f"{API}/events/{ident}",
             title=title,
             start=start,
             end=end,
@@ -185,6 +187,7 @@ class KulturdatenAdapter(SourceAdapter):
             is_free=is_free,
             category_raw=category_raw,
             description=(attr.get("description", {}) or {}).get("de"),
+            description_public=True,  # CC-BY open data — exportable with attribution
             event_status=status,
             payload={"event": entry, "description": (attr.get("description", {}) or {}).get("de", "")[:1500]},
         )
