@@ -119,6 +119,67 @@ def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
     return stats
 
 
+IMAGE_RECHECK_DAYS = 7
+IMAGE_BUDGET = 150
+
+IMAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS image_checks(
+  url TEXT PRIMARY KEY, last_status INTEGER, last_checked_at TEXT NOT NULL
+);
+"""
+
+
+def check_images(conn, fetcher, city: str, budget: int = IMAGE_BUDGET) -> dict:
+    """Verify hotlinked image URLs still resolve to images. A hard-dead or non-image
+    URL is nulled — the export-time placeholder takes over. Blocks/timeouts are left
+    alone (the frontend's onerror fallback already covers them gracefully)."""
+    conn.executescript(IMAGE_SCHEMA)
+    today = datetime.now(timezone.utc).date().isoformat()
+    due_before = (datetime.now(timezone.utc) - timedelta(days=IMAGE_RECHECK_DAYS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    rows = conn.execute(
+        """SELECT DISTINCT e.image_url FROM events e
+           JOIN occurrences o ON o.event_id = e.id
+           LEFT JOIN image_checks ic ON ic.url = e.image_url
+           WHERE e.city=? AND e.canonical_id=e.id AND e.link_dead_at IS NULL
+             AND e.image_url LIKE 'http%' AND o.nightlife_date >= ?
+             AND (ic.url IS NULL OR ic.last_checked_at < ?)
+           ORDER BY ic.last_checked_at IS NOT NULL, ic.last_checked_at""",
+        (city, today, due_before),
+    ).fetchall()
+
+    stats = {"due": len(rows), "checked": 0, "nulled": 0}
+    for row in rows:
+        if stats["checked"] >= budget:
+            break
+        url = row["image_url"]
+        status: int | None
+        content_type = ""
+        try:
+            resp = fetcher.head(url, rate=RATE, check_robots=False)
+            status = resp.status_code
+            content_type = resp.headers.get("content-type", "") if hasattr(resp, "headers") else ""
+        except Exception:  # noqa: BLE001 — transport errors are inconclusive
+            status = None
+        stats["checked"] += 1
+        conn.execute(
+            "INSERT INTO image_checks(url, last_status, last_checked_at) VALUES(?,?,?) "
+            "ON CONFLICT(url) DO UPDATE SET last_status=excluded.last_status, "
+            "last_checked_at=excluded.last_checked_at",
+            (url, status, now_iso()),
+        )
+        dead = status in DEAD_STATUSES or (
+            status is not None and status < 400 and content_type
+            and not content_type.startswith("image/")
+        )
+        if dead:
+            cur = conn.execute("UPDATE events SET image_url=NULL WHERE image_url=?", (url,))
+            stats["nulled"] += cur.rowcount
+    log.info("image check: %s", stats)
+    return stats
+
+
 def _kill(conn, url: str, now: str) -> int:
     cur = conn.execute(
         "UPDATE events SET link_dead_at=? WHERE source_url=? AND link_dead_at IS NULL",

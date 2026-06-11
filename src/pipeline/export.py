@@ -9,6 +9,9 @@ from pathlib import Path
 
 from .categorise.taxonomy import LABELS
 from .db import now_iso
+from .placeholders import placeholder_url
+
+PLACEHOLDER_PROVIDER = "loremflickr"  # loremflickr | picsum | none
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +41,10 @@ def _row_to_item(row) -> dict:
         "geo": {"lat": row["lat"], "lon": row["lon"]} if row["lat"] is not None else None,
         "price": json.loads(row["price_json"] or "{}"),
         "image_url": row["image_url"],
+        # stock stand-in when no real image exists — stable per event, varied across
+        # events; UIs should treat it as decoration and may label it "stock"
+        "placeholder_url": None if row["image_url"] else placeholder_url(
+            row["id"], row["category"], PLACEHOLDER_PROVIDER),
         "description": row["description"],  # open-licensed sources only (CC-BY)
         "source": row["source_slug"],
         "source_url": row["source_url"],

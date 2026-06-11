@@ -100,6 +100,21 @@ its GraphQL API is the liveness signal there). An event is pulled from the feed 
 **two** dead strikes ≥20 h apart; it's flagged (`link_dead_at`), not deleted, and if it
 headed a dedup cluster a surviving source is promoted so the event stays listed.
 
+### Other verifications & stock placeholders
+
+Each run also verifies: **image liveness** (hotlinked images re-checked weekly; hard
+404/410 or HTML-instead-of-image → nulled), **geo sanity** (coordinates outside the
+city bounding box are dropped), **price sanity** (numeric values > 500 € are treated
+as mis-parses and reverted to raw text), and **encoding health** (mojibake titles
+counted in telemetry). Results land in run telemetry.
+
+Imageless events get a `placeholder_url` in the feed: a category-matched stock image
+(LoremFlickr, CC images — "concert" for live music, "nightclub" for club events, …),
+deterministic per event id so cards differ from each other but never reshuffle.
+The demo labels them "stock"; provider configurable in `export.py`
+(`loremflickr` | `picsum` | `none`). Review the attribution caveat in
+`placeholders.py` before a public launch.
+
 ## Data & legal posture
 
 Facts only (title/date/venue/price), never editorial prose; every exported item links

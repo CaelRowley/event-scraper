@@ -15,7 +15,8 @@ from .dedup import run_dedup
 from .export import export_city
 from .fetch import Fetcher
 from .images import backfill_images
-from .linkcheck import check_links
+from .linkcheck import check_images, check_links
+from .verify import run_sanity_checks
 from .normalise.convert import to_event
 from .venues import VenueIndex, seed_venues
 
@@ -92,6 +93,8 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     conn.commit()
 
     link_stats = check_links(conn, fetcher, city.slug)
+    image_check_stats = check_images(conn, fetcher, city.slug)
+    sanity_stats = run_sanity_checks(conn, city.slug)
     conn.commit()
 
     llm_stats = {}
@@ -110,6 +113,8 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "dedup": dedup_stats,
         "images": image_stats,
         "links": link_stats,
+        "image_checks": image_check_stats,
+        "sanity": sanity_stats,
         "llm": llm_stats,
         "llm_queue_remaining": queue_size,
         "export": export_stats,
