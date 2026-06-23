@@ -67,12 +67,21 @@ jobs:
       # runs only after the freshness gate above passes, so a zero/failed scrape
       # never reaches D1 (and sync-d1 itself refuses to prune on empty results).
       - name: Sync to D1
-        if: vars.SCRAPE_LIMIT == '' || vars.SCRAPE_LIMIT == '0'   # dev mode (positive limit) must never prune production D1
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-        run: python -m pipeline sync-d1 --city berlin
+          SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
+        run: |
+          # A limited (dev) scrape only covers part of the window, so sync
+          # upsert-only (--no-prune): it adds/updates its rows without deleting
+          # the real rows it never re-emitted. Full runs prune as normal.
+          ARGS="--city berlin"
+          if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
+            echo "::notice::DEV MODE — syncing upsert-only (--no-prune)"
+            ARGS="$ARGS --no-prune"
+          fi
+          python -m pipeline sync-d1 $ARGS
 
       # commit DB + exported JSON: storage, serving (Pages), and the 60-day
       # scheduled-workflow keep-alive in one step

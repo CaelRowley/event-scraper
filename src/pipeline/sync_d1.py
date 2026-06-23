@@ -243,8 +243,14 @@ class D1Client:
 
 # --- sync --------------------------------------------------------------------
 
-def sync_city(conn, city: str, client: D1Client) -> dict:
-    """Diff the city's export window against D1 and write only the delta."""
+def sync_city(conn, city: str, client: D1Client, *, prune: bool = True) -> dict:
+    """Diff the city's export window against D1 and write only the delta.
+
+    prune=False is upsert-only: rows present in D1 but absent from this export
+    are left untouched (no deletes). Use for partial/limited scrapes that don't
+    cover the full window — otherwise the diff would delete every row the
+    limited run didn't re-emit.
+    """
     today = date.today()
     date_from = today.isoformat()
     date_to = (today + timedelta(days=cfg.WINDOW_DAYS)).isoformat()
@@ -270,7 +276,7 @@ def sync_city(conn, city: str, client: D1Client) -> dict:
         for rid, (row, h) in desired.items()
         if existing.get(rid) != h          # new or changed only
     ]
-    to_delete = [rid for rid in existing if rid not in desired]
+    to_delete = [rid for rid in existing if rid not in desired] if prune else []
 
     batches = list(iter_insert_batches(to_upsert)) + list(iter_delete_batches(to_delete))
     client.run_batches(batches)
@@ -281,10 +287,11 @@ def sync_city(conn, city: str, client: D1Client) -> dict:
         city, len(to_upsert), len(to_delete), unchanged, len(batches),
     )
     return {"city": city, "upserted": len(to_upsert), "deleted": len(to_delete),
-            "unchanged": unchanged, "requests": len(batches), "skipped": False}
+            "unchanged": unchanged, "requests": len(batches), "skipped": False,
+            "pruned": prune}
 
 
-def sync(city: str) -> dict:
+def sync(city: str, *, prune: bool = True) -> dict:
     """Entry point for the `sync-d1` CLI command."""
     from .db import connect
 
@@ -297,7 +304,7 @@ def sync(city: str) -> dict:
 
     conn = connect(cfg.DB_PATH)
     try:
-        return sync_city(conn, city, client)
+        return sync_city(conn, city, client, prune=prune)
     finally:
         client.close()
         conn.close()

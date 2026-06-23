@@ -28,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sync = sub.add_parser("sync-d1", help="push the export window into Gobento's Cloudflare D1")
     p_sync.add_argument("--city", default="berlin")
+    p_sync.add_argument("--no-prune", action="store_true",
+                        help="upsert only; don't delete D1 rows missing from this export "
+                             "(use for limited/partial scrapes)")
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -58,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "sync-d1":
         from .sync_d1 import sync
 
-        print(json.dumps(sync(args.city)))
+        print(json.dumps(sync(args.city, prune=not args.no_prune)))
         return 0
 
     if args.cmd == "venues-bootstrap":
