@@ -26,6 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     p_venues = sub.add_parser("venues-bootstrap", help="pull venue POIs from Overpass/OSM")
     p_venues.add_argument("--city", default="berlin")
 
+    p_sync = sub.add_parser("sync-d1", help="push the export window into Gobento's Cloudflare D1")
+    p_sync.add_argument("--city", default="berlin")
+
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -50,6 +53,12 @@ def main(argv: list[str] | None = None) -> int:
 
         conn = connect(cfg.DB_PATH)
         print(json.dumps(export_city(conn, args.city, cfg.PUBLIC_DIR)))
+        return 0
+
+    if args.cmd == "sync-d1":
+        from .sync_d1 import sync
+
+        print(json.dumps(sync(args.city)))
         return 0
 
     if args.cmd == "venues-bootstrap":
