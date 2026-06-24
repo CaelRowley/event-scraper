@@ -45,7 +45,7 @@ jobs:
         run: |
           ARGS="--city berlin --mode $MODE"
           if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
-            echo "::notice::DEV MODE — capping at $SCRAPE_LIMIT events/source; D1 sync + commit skipped"
+            echo "::notice::DEV MODE — capping at $SCRAPE_LIMIT events/source; sync is upsert-only, commit skipped"
             ARGS="$ARGS --limit $SCRAPE_LIMIT"
           fi
           python -m pipeline run $ARGS | tee telemetry.json
