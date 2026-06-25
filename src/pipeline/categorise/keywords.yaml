@@ -32,6 +32,13 @@ families:
     - oper\b|opera
     - performance(?:kunst)?
     - puppentheater
+    - burlesque|burleske
+    - varieté|variete|variety ?show
+    - cabaret  # English variety/burlesque; German "Kabarett" (satire) stays in comedy
+    - revue
+    - pantomime|\bmime\b
+    - drag[- ]?show
+    - zirkus|circus
   comedy:
     - comedy
     - stand[- ]?up

@@ -129,3 +129,9 @@ Ticketmaster fields are refreshed each run, not archived.
 A city is config (`src/pipeline/config.py`): timezone + source list. rausgegangen
 (~60 German cities), Ticketmaster, and Eventbrite already work in other cities;
 adding one means picking its local sources and seeding venue priors.
+
+Trigger a full run to populate D1 for the first time.
+
+```
+gh workflow run scrape.yml -f mode=full -R CaelRowley/event-scraper
+```

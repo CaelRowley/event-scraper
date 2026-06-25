@@ -19,7 +19,7 @@ from selectolax.parser import HTMLParser
 
 from ..db import ledger_get, ledger_put
 from ..extract.jsonld import events_from_html
-from ..fetch import RateSpec
+from ..fetch import BROWSER_UA, RateSpec
 from ..models import RawEvent
 from .base import SourceAdapter
 from .jsonld_common import jsonld_to_raw
@@ -37,6 +37,10 @@ DETAIL_BUDGET = 150
 class LivegigsAdapter(SourceAdapter):
     slug = "livegigs"
     rate = RateSpec(min_interval=2.0, jitter=(0.5, 1.5))
+    # Cloudflare-fronted: the honest bot UA gets intermittent 403 challenges, so use a
+    # browser UA (same documented exception as ra/eventbrite; robots.txt is still honoured
+    # and we compensate with ≥2s/req + per-event linkbacks).
+    user_agent = BROWSER_UA
     cheap_delta = False
 
     def fetch_events(self, window_days: int = 14, limit: int | None = None) -> Iterator[RawEvent]:

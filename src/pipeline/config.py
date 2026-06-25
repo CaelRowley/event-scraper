@@ -28,6 +28,9 @@ CITIES = {
             "livegigs",
             "rausgegangen",
             "tip_berlin",
+            "comedy_in_english",
+            "comedy_cafe",
+            "prinzipal",
             "eventbrite",
             "ticketmaster",
         ],
@@ -45,6 +48,11 @@ def build_adapters(city: CityConfig, fetcher, conn, *, mode: str = "full",
     from .adapters.livegigs import LivegigsAdapter
     from .adapters.ra import ResidentAdvisorAdapter
     from .adapters.ticketmaster import TicketmasterAdapter
+    from .adapters.tribe import (
+        ComedyCafeAdapter,
+        ComedyInEnglishAdapter,
+        PrinzipalKreuzbergAdapter,
+    )
 
     registry = {
         "kulturdaten": KulturdatenAdapter,
@@ -53,6 +61,9 @@ def build_adapters(city: CityConfig, fetcher, conn, *, mode: str = "full",
         "livegigs": LivegigsAdapter,
         "rausgegangen": RausgegangenAdapter,
         "tip_berlin": TipBerlinAdapter,
+        "comedy_in_english": ComedyInEnglishAdapter,
+        "comedy_cafe": ComedyCafeAdapter,
+        "prinzipal": PrinzipalKreuzbergAdapter,
         "eventbrite": EventbriteAdapter,
         "ticketmaster": TicketmasterAdapter,
     }
