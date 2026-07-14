@@ -4,12 +4,27 @@ to the network except through the shared Fetcher (which owns rate limiting)."""
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 
 from ..fetch import DEFAULT_UA, Fetcher, RateSpec
 from ..models import RawEvent
 
 log = logging.getLogger(__name__)
+
+
+def ensure_scheme(url: str | None) -> str | None:
+    """Source data sometimes carries bare hosts ('www.x.de') — unusable as feed links
+    and invisible to the image backfill's http-prefix filter. Prefix https:// when the
+    value looks like a hostname; return anything else (mailto:, garbage, None) as-is."""
+    if not url:
+        return url
+    url = url.strip()
+    if url.startswith(("http://", "https://")):
+        return url
+    if re.match(r"^[\w-]+(\.[\w-]+)+([/?#]|$)", url):
+        return f"https://{url}"
+    return url
 
 
 class SourceAdapter:

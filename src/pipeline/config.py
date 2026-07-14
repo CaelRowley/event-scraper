@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 DB_PATH = "data/pipeline.db"
 HTTP_CACHE_PATH = "data/http_cache.db"
 PUBLIC_DIR = "public"
-WINDOW_DAYS = 14
+WINDOW_DAYS = 31  # scrape + export horizon (~1 month ahead)
 
 
 @dataclass

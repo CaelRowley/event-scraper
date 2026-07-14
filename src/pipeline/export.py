@@ -7,6 +7,7 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
+from . import config as cfg
 from .categorise.taxonomy import LABELS
 from .db import now_iso
 from .placeholders import placeholder_url
@@ -14,8 +15,6 @@ from .placeholders import placeholder_url
 PLACEHOLDER_PROVIDER = "loremflickr"  # loremflickr | picsum | none
 
 log = logging.getLogger(__name__)
-
-WINDOW_DAYS = 14
 
 
 def _row_to_item(row) -> dict:
@@ -56,7 +55,7 @@ def _row_to_item(row) -> dict:
 def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
     today = date.today()
     date_from = today.isoformat()
-    date_to = (today + timedelta(days=WINDOW_DAYS)).isoformat()
+    date_to = (today + timedelta(days=cfg.WINDOW_DAYS)).isoformat()
     rows = conn.execute(
         """SELECT e.*, o.starts_at_utc, o.ends_at_utc, o.starts_at_local, o.doors_at_local,
                   o.nightlife_date, o.time_unknown, o.status AS occ_status

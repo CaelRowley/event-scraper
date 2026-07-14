@@ -14,7 +14,7 @@ from collections.abc import Iterator
 
 from ..fetch import RateSpec
 from ..models import RawEvent
-from .base import SourceAdapter
+from .base import SourceAdapter, ensure_scheme
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class BerlinDeAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=f"{endpoint}-{item.get('id')}",
-            source_url=(item.get("www") or "").strip() or f"{BASE}/{endpoint}/",
+            source_url=ensure_scheme((item.get("www") or "").strip()) or f"{BASE}/{endpoint}/",
             title=title,
             start=start,
             end=end,

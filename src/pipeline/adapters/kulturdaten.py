@@ -18,7 +18,7 @@ from datetime import date, timedelta
 
 from ..fetch import RateSpec
 from ..models import RawEvent
-from .base import SourceAdapter
+from .base import SourceAdapter, ensure_scheme
 
 log = logging.getLogger(__name__)
 
@@ -175,7 +175,8 @@ class KulturdatenAdapter(SourceAdapter):
             source=self.slug,
             source_event_id=ident,
             # human page when the attraction has one; the raw API record only as last resort
-            source_url=attr.get("website") or external or f"{API}/events/{ident}",
+            source_url=ensure_scheme(attr.get("website")) or ensure_scheme(external)
+            or f"{API}/events/{ident}",
             title=title,
             start=start,
             end=end,

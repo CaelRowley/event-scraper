@@ -24,6 +24,11 @@ from tenacity import (
 log = logging.getLogger(__name__)
 
 DEFAULT_UA = "events-pipeline/0.1 (+https://github.com/CaelRowley/event-scraper)"
+
+# Hard per-request caps. httpx's read timeout is per-chunk, so a server trickling
+# bytes can hold a request open for many minutes — observed costing ~36 min/run in CI.
+MAX_RESPONSE_SECONDS = 60.0
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 BROWSER_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -38,7 +43,14 @@ class RateSpec:
     jitter: tuple[float, float] = (0.5, 2.0)
 
 
+class FetchStallError(Exception):
+    """Response exceeded MAX_RESPONSE_SECONDS or MAX_RESPONSE_BYTES. Never retried —
+    the stall is a property of the URL, and retrying would triple the cost."""
+
+
 def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, FetchStallError):
+        return False
     if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -105,12 +117,27 @@ class Fetcher:
         reraise=True,
     )
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
-        resp = self.client.request(method, url, **kwargs)
+        deadline = time.monotonic() + MAX_RESPONSE_SECONDS
+        request = self.client.build_request(method, url, **kwargs)
+        resp = self.client.send(request, stream=True)
         self.requests_made += 1
+        buf = bytearray()
+        try:
+            for chunk in resp.iter_bytes():
+                buf += chunk
+                if time.monotonic() > deadline or len(buf) > MAX_RESPONSE_BYTES:
+                    elapsed = time.monotonic() - (deadline - MAX_RESPONSE_SECONDS)
+                    log.warning("fetch stalled after %.0fs / %d bytes — aborting: %s",
+                                elapsed, len(buf), url)
+                    raise FetchStallError(url)
+        finally:
+            resp.close()
+        # documented read() path has no wall-clock cap, so the body is assembled here
+        resp._content = bytes(buf)  # noqa: SLF001
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
             if retry_after and retry_after.isdigit():
-                time.sleep(min(int(retry_after), 120))
+                time.sleep(min(int(retry_after), 30))
             resp.raise_for_status()
         if resp.status_code >= 500:
             resp.raise_for_status()

@@ -76,10 +76,11 @@ Other commands: `python -m pipeline export`, `python -m pipeline venues-bootstra
 
 ## Deployment
 
-`.github/workflows/scrape.yml` runs 2×/day (03:00 full / 13:00 delta UTC), commits
+`.github/workflows/scrape.yml` runs once daily (03:00 UTC, full mode), commits
 `data/` + `public/` back to the repo (storage + Pages serving + the 60-day cron
 keep-alive in one), and fails loudly when sources break or yield nothing.
-Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`.
+Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for the
+Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
 
 ### Image backfill
 
@@ -134,4 +135,11 @@ Trigger a full run to populate D1 for the first time.
 
 ```
 gh workflow run scrape.yml -f mode=full -R CaelRowley/event-scraper
+```
+
+`SCRAPE_LIMIT` (repo variable) caps events per source for dev smoke runs; `0` or
+unset means no cap — a normal full scrape with D1 sync and data commit.
+
+```
+gh variable set SCRAPE_LIMIT --body "0" -R CaelRowley/event-scraper
 ```
