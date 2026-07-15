@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -76,20 +77,34 @@ class Fetcher:
         else:
             self.client = httpx.Client(headers=headers, timeout=30.0, follow_redirects=True)
         self._last_request: dict[str, float] = {}
+        # _robots is unlocked by choice: a race costs at most one duplicate robots.txt GET
         self._robots: dict[str, Protego | None] = {}
+        self._locks_guard = threading.Lock()
+        self._domain_locks: dict[str, threading.Lock] = {}
+        self._counter_lock = threading.Lock()
         self.default_ua = user_agent
         self.requests_made = 0
 
     # --- politeness -----------------------------------------------------------
 
+    def _domain_lock(self, domain: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._domain_locks.setdefault(domain, threading.Lock())
+
     def _throttle(self, url: str, rate: RateSpec) -> None:
+        # Sleeping while holding the domain lock is intentional: same-domain callers
+        # queue here and each computes its wait from the previous caller's stamp, so
+        # start-to-start spacing stays exactly min_interval+jitter across all threads.
+        # Different domains hold different locks and never block each other.
+        # (Retry backoff and Retry-After sleeps run outside this lock, as before.)
         domain = urlsplit(url).netloc
-        last = self._last_request.get(domain)
-        if last is not None:
-            wait = rate.min_interval + random.uniform(*rate.jitter) - (time.monotonic() - last)
-            if wait > 0:
-                time.sleep(wait)
-        self._last_request[domain] = time.monotonic()
+        with self._domain_lock(domain):
+            last = self._last_request.get(domain)
+            if last is not None:
+                wait = rate.min_interval + random.uniform(*rate.jitter) - (time.monotonic() - last)
+                if wait > 0:
+                    time.sleep(wait)
+            self._last_request[domain] = time.monotonic()
 
     def _robots_for(self, url: str) -> Protego | None:
         domain = urlsplit(url).netloc
@@ -120,7 +135,8 @@ class Fetcher:
         deadline = time.monotonic() + MAX_RESPONSE_SECONDS
         request = self.client.build_request(method, url, **kwargs)
         resp = self.client.send(request, stream=True)
-        self.requests_made += 1
+        with self._counter_lock:
+            self.requests_made += 1
         buf = bytearray()
         try:
             for chunk in resp.iter_bytes():

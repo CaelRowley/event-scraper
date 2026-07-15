@@ -77,10 +77,18 @@ Other commands: `python -m pipeline export`, `python -m pipeline venues-bootstra
 ## Deployment
 
 `.github/workflows/scrape.yml` runs once daily (03:00 UTC, full mode), commits
-`data/` + `public/` back to the repo (storage + Pages serving + the 60-day cron
-keep-alive in one), and fails loudly when sources break or yield nothing.
-Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for the
-Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
+`public/` back to the repo (Pages serving + the 60-day cron keep-alive), and fails
+loudly when sources break or yield nothing. `data/` (SQLite DB + HTTP cache — the
+delta ledgers, detail caches, image-scan ledger, pending LLM batch id) persists
+between runs via `actions/cache`, never via git; a cache miss just means one slower
+cold run. Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for
+the Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
+
+Sources fetch concurrently (one thread per adapter, own SQLite connection each);
+per-domain politeness is enforced globally by domain locks in the shared fetcher,
+so parallelism never changes request spacing toward any one site. The image
+backfill and link/image checks also overlap after dedup. `PIPELINE_MAX_WORKERS`
+(default 12) caps the pool.
 
 ### Image backfill
 

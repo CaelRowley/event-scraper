@@ -38,9 +38,11 @@ CITIES = {
 }
 
 
-def build_adapters(city: CityConfig, fetcher, conn, *, mode: str = "full",
-                   only: list[str] | None = None) -> list:
-    """Instantiate the city's adapters. mode=delta → cheap-delta sources only."""
+def select_adapters(city: CityConfig, *, mode: str = "full",
+                    only: list[str] | None = None) -> list[tuple[str, type]]:
+    """(slug, adapter_class) pairs. Construction is deferred so each runner worker
+    can instantiate on its own thread-local connection (adapter __init__ runs DDL).
+    mode=delta → cheap-delta sources only."""
     from .adapters.berlin_de import BerlinDeAdapter
     from .adapters.eventbrite import EventbriteAdapter
     from .adapters.jsonld_sitemap import RausgegangenAdapter, TipBerlinAdapter
@@ -67,12 +69,18 @@ def build_adapters(city: CityConfig, fetcher, conn, *, mode: str = "full",
         "eventbrite": EventbriteAdapter,
         "ticketmaster": TicketmasterAdapter,
     }
-    adapters = []
+    selected = []
     for slug in city.sources:
         if only and slug not in only:
             continue
         cls = registry[slug]
         if mode == "delta" and not cls.cheap_delta:
             continue
-        adapters.append(cls(fetcher, conn))
-    return adapters
+        selected.append((slug, cls))
+    return selected
+
+
+def build_adapters(city: CityConfig, fetcher, conn, *, mode: str = "full",
+                   only: list[str] | None = None) -> list:
+    """Instantiate the city's adapters on the given connection."""
+    return [cls(fetcher, conn) for _, cls in select_adapters(city, mode=mode, only=only)]

@@ -29,7 +29,9 @@ RATE = RateSpec(min_interval=1.0, jitter=(0.2, 0.8))
 
 # ra.co serves HTML only to browsers (Cloudflare) — its GraphQL API is the liveness
 # source of truth there, so link-checking its pages would only produce false deaths.
-SKIP_HOSTS = ("ra.co",)
+# kulturdaten record URLs: the adapter re-pages the full listing every run, so an
+# event's presence there IS the liveness signal — probing the API record is redundant.
+SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin")
 BROWSER_UA_HOSTS = ("eventbrite.de", "eventbrite.com")
 
 SCHEMA = """
@@ -115,6 +117,7 @@ def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
         if strikes >= STRIKES_TO_KILL:
             stats["killed"] += _kill(conn, url, now)
             stats["promoted"] += _promote_survivors(conn)
+        conn.commit()  # per probe — this phase runs concurrently with the other checks
     log.info("link check: %s", stats)
     return stats
 
@@ -176,6 +179,7 @@ def check_images(conn, fetcher, city: str, budget: int = IMAGE_BUDGET) -> dict:
         if dead:
             cur = conn.execute("UPDATE events SET image_url=NULL WHERE image_url=?", (url,))
             stats["nulled"] += cur.rowcount
+        conn.commit()  # per probe — this phase runs concurrently with the other checks
     log.info("image check: %s", stats)
     return stats
 

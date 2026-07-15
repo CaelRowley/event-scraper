@@ -81,6 +81,10 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # multi-connection concurrency (one conn per worker thread): writers queue at the
+    # WAL write lock instead of failing, and NORMAL is durable enough under WAL
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn

@@ -115,6 +115,7 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
     """Scan source pages of imageless feed-window events, soonest first.
     One scan per URL ever; a found image is applied to every event sharing the URL."""
     propagated = _propagate_shared_urls(conn)
+    conn.commit()
     today = datetime.now(timezone.utc).date().isoformat()
     rows = conn.execute(
         """SELECT e.source_url, MIN(o.starts_at_utc) AS next_start
@@ -137,19 +138,24 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
             continue
         if ledger_get(conn, "imgscan", url) is not None:
             continue  # one attempt per page, ever
+        # commit after every write: this runs concurrently with the link/image checks,
+        # and an open write tx across a fetch would starve them at the WAL lock
         try:
             if not fetcher.allowed(url):
                 ledger_put(conn, "imgscan", url, status=-1)
+                conn.commit()
                 continue
             resp = fetcher.get(url, rate=RATE)
             stats["scanned"] += 1
             ledger_put(conn, "imgscan", url, status=resp.status_code)
+            conn.commit()
             if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "html"):
                 continue
             image = find_image(resp.text, str(resp.url))
         except Exception as exc:  # noqa: BLE001 — a dead organiser site must not kill the run
             log.debug("imgscan %s failed: %s", url, exc)
             ledger_put(conn, "imgscan", url, status=-2)
+            conn.commit()
             stats["scanned"] += 1
             continue
         if image:
@@ -158,6 +164,7 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
                 "AND (image_url IS NULL OR image_url='')",
                 (image, url),
             )
+            conn.commit()
             stats["found"] += 1
             stats["events_updated"] += cur.rowcount
     log.info("image backfill: %s", stats)

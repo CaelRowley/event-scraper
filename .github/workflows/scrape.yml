@@ -32,6 +32,16 @@ jobs:
 
       - run: pip install -e .
 
+      # data/ (SQLite DB + HTTP cache) persists between runs via the cache, NOT git —
+      # the delta ledgers, image-scan ledger, detail caches, and pending LLM batch id
+      # all live there. A cache miss just means one slower cold run.
+      - name: Restore data
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: pipeline-data-${{ github.run_id }}
+          restore-keys: pipeline-data-
+
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -64,6 +74,20 @@ jobs:
               sys.exit(f"ALERT: {len(t['errors'])} sources failed: {list(t['errors'])}")
           EOF
 
+      # save only after the freshness gate: a failed or zero-yield run must not
+      # persist its (possibly corrupt/empty) state as the next run's starting point
+      - name: Save data
+        run: |
+          # unbounded-growth guard: a cold HTTP cache self-heals, the pipeline DB must stay
+          if [ -f data/http_cache.db ] && [ "$(stat -c%s data/http_cache.db)" -gt 262144000 ]; then
+            echo "::notice::http_cache.db over 250MB — dropping it (self-heals next run)"
+            rm -f data/http_cache.db*
+          fi
+      - uses: actions/cache/save@v4
+        with:
+          path: data
+          key: pipeline-data-${{ github.run_id }}
+
       # push the export window into Gobento's Cloudflare D1 (city_events table).
       # runs only after the freshness gate above passes, so a zero/failed scrape
       # never reaches D1 (and sync-d1 itself refuses to prune on empty results).
@@ -84,14 +108,14 @@ jobs:
           fi
           python -m pipeline sync-d1 $ARGS
 
-      # commit DB + exported JSON: storage, serving (Pages), and the 60-day
-      # scheduled-workflow keep-alive in one step
+      # commit exported JSON: serving (Pages) and the 60-day scheduled-workflow
+      # keep-alive. The DB/cache persist via actions/cache above, never via git.
       - name: Commit data
         if: vars.SCRAPE_LIMIT == '' || vars.SCRAPE_LIMIT == '0'   # dev mode must not commit a truncated dataset
         run: |
           git config user.name "scrape-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add data/ public/
+          git add public/
           git diff --cached --quiet || git commit -m "data: $(date -u +%F-%H%M)"
           git push
 

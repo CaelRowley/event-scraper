@@ -5,7 +5,7 @@ import pytest
 
 import pipeline.fetch as fetch_mod
 from pipeline.adapters.base import ensure_scheme
-from pipeline.fetch import Fetcher, FetchStallError
+from pipeline.fetch import Fetcher, FetchStallError, RateSpec
 
 
 class FakeTime:
@@ -107,6 +107,26 @@ def test_retry_after_sleep_capped_at_30s(monkeypatch):
 
     # and nothing slept longer than the cap
     assert max(faketime.sleeps) <= 30
+
+
+def test_throttle_spacing_same_domain(monkeypatch):
+    faketime = FakeTime()
+    monkeypatch.setattr(fetch_mod, "time", faketime)
+    fetcher = _fetcher(lambda request: httpx.Response(200))
+    rate = RateSpec(min_interval=5, jitter=(0, 0))
+    for _ in range(3):
+        fetcher.get("https://one.example/x", rate=rate, check_robots=False)
+    assert faketime.sleeps == [5.0, 5.0]
+
+
+def test_throttle_no_wait_across_domains(monkeypatch):
+    faketime = FakeTime()
+    monkeypatch.setattr(fetch_mod, "time", faketime)
+    fetcher = _fetcher(lambda request: httpx.Response(200))
+    rate = RateSpec(min_interval=5, jitter=(0, 0))
+    fetcher.get("https://one.example/x", rate=rate, check_robots=False)
+    fetcher.get("https://two.example/x", rate=rate, check_robots=False)
+    assert faketime.sleeps == []
 
 
 @pytest.mark.parametrize(
