@@ -100,6 +100,9 @@ class KulturdatenAdapter(SourceAdapter):
             f"INSERT OR REPLACE INTO {table}(id,payload,fetched_at) VALUES(?,?,?)",
             (ref_id, json.dumps(payload, ensure_ascii=False), now_iso()),
         )
+        # commit now — the caller fetches the location detail next, and a write tx
+        # held across that HTTP request starves the other adapter workers
+        self.conn.commit()
         return payload
 
     # --- main -------------------------------------------------------------------

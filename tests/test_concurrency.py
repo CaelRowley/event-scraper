@@ -13,7 +13,7 @@ import httpx
 
 import pipeline.config as cfg
 import pipeline.runner as runner_mod
-from pipeline.db import connect, upsert_event
+from pipeline.db import connect, ledger_get, ledger_put, upsert_event
 from pipeline.fetch import Fetcher, RateSpec
 from pipeline.models import Event, Occurrence, Price, RawEvent
 from pipeline.adapters.base import SourceAdapter
@@ -141,6 +141,20 @@ def test_busy_timeout_lets_second_writer_wait(tmp_path):
     t.join(timeout=10)
     holder.close()
     assert done == [True]
+
+
+def test_ledger_put_never_leaves_a_transaction_open(tmp_path):
+    """Adapters call ledger_put between HTTP fetches; an open write tx spanning a
+    fetch starved every other worker at the WAL lock (the 2026-07-18 CI failure)."""
+    db = str(tmp_path / "t.db")
+    connect(db).close()
+    a = connect(db)
+    ledger_put(a, "test", "https://x.example/p", status=200)
+    assert not a.in_transaction  # committed — holds no write lock
+    b = connect(db)  # and the row is durably visible to other connections
+    assert ledger_get(b, "test", "https://x.example/p") is not None
+    a.close()
+    b.close()
 
 
 class FakeAdapterOK(SourceAdapter):

@@ -123,6 +123,10 @@ def ledger_put(conn, source: str, url: str, *, etag=None, last_modified=None,
              last_seen_at=excluded.last_seen_at""",
         (source, url, etag, last_modified, lastmod, content_hash, status, now, now),
     )
+    # self-committing: callers (sitemap adapters, image backfill) invoke this between
+    # HTTP fetches — an open write tx spanning a fetch starves every other worker at
+    # the WAL write lock ("database is locked" past busy_timeout)
+    conn.commit()
 
 
 # --- snapshots ---------------------------------------------------------------
