@@ -1,16 +1,16 @@
-"""Image backfill: for feed events with no image, fetch the source page once and pull
+"""Image backfill: for feed events with no image, fetch the source page and pull
 JSON-LD image → og:image → twitter:image → link rel=image_src.
 
 Polite and bounded: robots-checked, per-domain throttled via the shared Fetcher,
-budget-capped per run, and every attempt is ledger-recorded (source slug "imgscan")
-so a page is only ever scanned once. Stops at meta/JSON-LD images — random <img>
-tags are too often logos.
+budget-capped per run, and every attempt is ledger-recorded (source slug "imgscan").
+Misses are retried after a cooling-off period so a temporary block or a page that
+gets its artwork later is not permanently stuck without an image.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlsplit
 
 from selectolax.parser import HTMLParser
@@ -22,6 +22,7 @@ from .fetch import RateSpec
 log = logging.getLogger(__name__)
 
 SCAN_BUDGET = 120
+SCAN_RETRY_DAYS = 7
 RATE = RateSpec(min_interval=1.0, jitter=(0.3, 1.0))
 
 # pages that are not scannable HTML or are known to block us
@@ -111,9 +112,24 @@ def _propagate_shared_urls(conn) -> int:
     return cur.rowcount
 
 
+def scan_is_due(ledger_row, now: datetime | None = None) -> bool:
+    """Whether a source page has never been scanned or its retry TTL expired."""
+    if ledger_row is None:
+        return True
+    last_seen = ledger_row["last_seen_at"]
+    if not last_seen:
+        return True
+    try:
+        checked_at = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    current = now or datetime.now(timezone.utc)
+    return checked_at <= current - timedelta(days=SCAN_RETRY_DAYS)
+
+
 def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict:
     """Scan source pages of imageless feed-window events, soonest first.
-    One scan per URL ever; a found image is applied to every event sharing the URL."""
+    A found image is applied to every event sharing the URL; misses retry weekly."""
     propagated = _propagate_shared_urls(conn)
     conn.commit()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -136,10 +152,10 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
         host = urlsplit(url).netloc
         if any(host.endswith(s) for s in SKIP_HOSTS):
             continue
-        if ledger_get(conn, "imgscan", url) is not None:
-            continue  # one attempt per page, ever
-        # commit after every write: this runs concurrently with the link/image checks,
-        # and an open write tx across a fetch would starve them at the WAL lock
+        if not scan_is_due(ledger_get(conn, "imgscan", url)):
+            continue
+        # Commit after every write so no write transaction stays open across the
+        # following HTTP request (adapter workers may still be finishing).
         try:
             if not fetcher.allowed(url):
                 ledger_put(conn, "imgscan", url, status=-1)

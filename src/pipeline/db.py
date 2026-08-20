@@ -200,6 +200,24 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
     return ev.id, changed
 
 
+def reconcile_occurrences(conn, eid: str, starts_at_utc: set[str]) -> int:
+    """Remove occurrences a successfully refreshed source no longer reports.
+
+    Adapters may yield the same source event more than once (one row per slot),
+    so callers collect the complete set and reconcile only after the adapter has
+    finished without error. This keeps valid multi-slot events while removing
+    stale times left behind by reschedules or changed opening-hour schedules.
+    """
+    if not starts_at_utc:
+        return 0
+    placeholders = ",".join("?" for _ in starts_at_utc)
+    cur = conn.execute(
+        f"DELETE FROM occurrences WHERE event_id=? AND starts_at_utc NOT IN ({placeholders})",
+        (eid, *sorted(starts_at_utc)),
+    )
+    return cur.rowcount
+
+
 def set_category(conn, eid: str, category: str, tier: str, confidence: float, tags: list[str]) -> None:
     conn.execute(
         "UPDATE events SET category=?, category_tier=?, category_confidence=?, tags_json=? WHERE id=?",

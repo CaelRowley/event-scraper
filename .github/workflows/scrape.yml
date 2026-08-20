@@ -45,13 +45,17 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          TICKETMASTER_KEY: ${{ secrets.TICKETMASTER_KEY }}
+          # Accept the original documented name and the TICKET_MASTER_KEY name
+          # already configured in this repository; the Python adapter reads the
+          # normalized TICKETMASTER_KEY environment variable either way.
+          TICKETMASTER_KEY: ${{ secrets.TICKETMASTER_KEY || secrets.TICKET_MASTER_KEY }}
           MODE: ${{ github.event.inputs.mode || 'full' }}
           # repo variable (Settings → Variables): set to a positive number for a
           # quick dev smoke run — caps events/source and skips D1 sync + commit
           # (see below). 0 (or unset) = normal full scrape.
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
         run: |
+          set -o pipefail
           # --llm-poll 300: wait ≤5 min for the Haiku batch; an unfinished batch is
           # collected at the start of the next run (pending_batch_id in the kv table)
           ARGS="--city berlin --mode $MODE --llm-poll 300"

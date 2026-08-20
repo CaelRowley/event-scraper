@@ -1,4 +1,7 @@
-from pipeline.images import find_image
+from datetime import datetime, timedelta
+
+from pipeline.db import connect, ledger_get, ledger_put
+from pipeline.images import find_image, scan_is_due
 
 
 def test_og_image():
@@ -64,3 +67,13 @@ def test_logo_og_falls_through_to_content_image():
 def test_content_image_without_size_attrs_accepted():
     html = "<main><img data-src='/media/flyer.jpg'></main>"
     assert find_image(html, "https://site.example/") == "https://site.example/media/flyer.jpg"
+
+
+def test_image_scan_miss_retries_after_ttl():
+    conn = connect(":memory:")
+    ledger_put(conn, "imgscan", "https://site.example/event", status=200)
+    row = ledger_get(conn, "imgscan", "https://site.example/event")
+    checked_at = datetime.fromisoformat(row["last_seen_at"].replace("Z", "+00:00"))
+
+    assert not scan_is_due(row, checked_at + timedelta(days=6))
+    assert scan_is_due(row, checked_at + timedelta(days=8))

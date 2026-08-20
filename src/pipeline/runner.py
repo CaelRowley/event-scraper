@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from . import config as cfg
 from .categorise.llm import run_llm_tier
 from .categorise.rules import classify, classify_best_effort
-from .db import connect, queue_for_llm, set_category, snapshot, upsert_event
+from .db import connect, queue_for_llm, reconcile_occurrences, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
 from .fetch import Fetcher
@@ -47,6 +47,7 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
     threading.current_thread().name = slug
     res = AdapterResult(slug)
     conn = connect(db_path)
+    seen_occurrences: dict[str, set[str]] = {}
     try:
         adapter = adapter_cls(fetcher, conn)  # adapter DDL lands on this thread's conn
         log.info("=== source: %s", slug)
@@ -63,6 +64,9 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
                 venue_prior=venue_prior,
             )
             eid, changed = upsert_event(conn, ev)
+            seen_occurrences.setdefault(eid, set()).update(
+                occ.starts_at_utc for occ in ev.occurrences
+            )
             res.count += 1
             if changed:
                 snapshot(conn, ev.source, ev.source_event_id,
@@ -86,6 +90,14 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
                     res.descriptions[eid] = ev.description
                 res.tier_counts["queued_llm"] += 1
             conn.commit()  # per event — see module invariant
+        # A source refresh is authoritative for every event it returned. Reconcile
+        # only after clean completion: a mid-stream adapter failure must never
+        # delete slots that simply were not reached. Limited smoke runs are also
+        # partial by definition, so they remain upsert-only.
+        if limit is None:
+            for eid, starts in seen_occurrences.items():
+                reconcile_occurrences(conn, eid, starts)
+                conn.commit()
         conn.commit()  # sitemap adapters write their ledger after the final yield
     except Exception as exc:  # noqa: BLE001 — one dead source never blocks the run
         conn.rollback()  # release any held write lock before reporting
@@ -136,24 +148,16 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     dedup_stats = run_dedup(conn, city.slug)
     conn.commit()
 
-    # The three check phases probe disjoint URL sets and touch disjoint rows (by
-    # predicate), so they overlap safely — same-host collisions serialize in the
-    # Fetcher's domain locks. Each runs on its own connection.
-    def _phase(fn):
-        pconn = connect(main_db)
-        try:
-            return fn(pconn, fetcher, city.slug)
-        finally:
-            pconn.commit()
-            pconn.close()
-
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="post") as ex:
-        f_img = ex.submit(_phase, backfill_images)
-        f_link = ex.submit(_phase, check_links)
-        f_ic = ex.submit(_phase, check_images)
-        image_stats = f_img.result()
-        link_stats = f_link.result()
-        image_check_stats = f_ic.result()
+    # These phases all write to SQLite. Running them concurrently saved some
+    # wall-clock time but still produced intermittent WAL lock failures in CI.
+    # Their HTTP probes are budgeted already, so favor a deterministic single
+    # writer here; adapter fetching above remains concurrent.
+    image_stats = backfill_images(conn, fetcher, city.slug)
+    conn.commit()
+    link_stats = check_links(conn, fetcher, city.slug)
+    conn.commit()
+    image_check_stats = check_images(conn, fetcher, city.slug)
+    conn.commit()
 
     sanity_stats = run_sanity_checks(conn, city.slug)
     conn.commit()
