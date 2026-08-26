@@ -51,8 +51,8 @@ jobs:
           TICKETMASTER_KEY: ${{ secrets.TICKETMASTER_KEY || secrets.TICKET_MASTER_KEY }}
           MODE: ${{ github.event.inputs.mode || 'full' }}
           # repo variable (Settings → Variables): set to a positive number for a
-          # quick dev smoke run — caps events/source and skips D1 sync + commit
-          # (see below). 0 (or unset) = normal full scrape.
+          # quick dev smoke run — caps events/source and makes the D1 sync
+          # upsert-only (see below). 0 (or unset) = normal full scrape.
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
         run: |
           set -o pipefail
@@ -60,7 +60,7 @@ jobs:
           # collected at the start of the next run (pending_batch_id in the kv table)
           ARGS="--city berlin --mode $MODE --llm-poll 300"
           if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
-            echo "::notice::DEV MODE — capping at $SCRAPE_LIMIT events/source; sync is upsert-only, commit skipped"
+            echo "::notice::DEV MODE — capping at $SCRAPE_LIMIT events/source; sync is upsert-only"
             ARGS="$ARGS --limit $SCRAPE_LIMIT"
           fi
           python -m pipeline run $ARGS | tee telemetry.json
@@ -112,15 +112,24 @@ jobs:
           fi
           python -m pipeline sync-d1 $ARGS
 
-      # commit exported JSON: serving (Pages) and the 60-day scheduled-workflow
-      # keep-alive. The DB/cache persist via actions/cache above, never via git.
-      - name: Commit data
-        if: vars.SCRAPE_LIMIT == '' || vars.SCRAPE_LIMIT == '0'   # dev mode must not commit a truncated dataset
+      # The exported feed is NOT committed: D1 (above) is its only consumer, and
+      # public/berlin/ is gitignored. What still needs a commit is the schedule
+      # itself — GitHub disables a scheduled workflow after 60 days without repo
+      # activity — so land one only when the branch is actually going stale.
+      # Normal development resets the clock on its own and this stays a no-op.
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
         run: |
+          age_days=$(( ( $(date -u +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          if [ "$age_days" -lt 50 ]; then
+            echo "last commit ${age_days}d ago — schedule is safe, nothing to commit"
+            exit 0
+          fi
           git config user.name "scrape-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add public/
-          git diff --cached --quiet || git commit -m "data: $(date -u +%F-%H%M)"
+          date -u +%FT%TZ > .github/last-keepalive
+          git add .github/last-keepalive
+          git commit -m "chore: keep scheduled workflow alive"
           git push
 
   test:
