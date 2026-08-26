@@ -43,7 +43,14 @@ from .export import _row_to_item
 log = logging.getLogger(__name__)
 
 # Data columns, in INSERT order. `content_hash` + `synced_at` are appended below.
-# Keep in sync with city_events in Gobento/backend/schema.sql.
+#
+# Must match the `city_events` table, whose schema Gobento owns and this
+# pipeline only writes rows into:
+#     Gobento/backend/migrations-scraper/0001_city_events.sql
+#
+# Adding or renaming a column there is a cross-repo change — this list is
+# hand-maintained and positional, so a mismatch surfaces as a failing sync
+# rather than as an error anything here can catch.
 CONTENT_COLUMNS = [
     "id", "event_id", "city", "title", "category", "category_label", "tags_json",
     "starts_at_utc", "starts_at_local", "ends_at_utc", "doors_at_local", "nightlife_date",
