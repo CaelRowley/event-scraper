@@ -141,12 +141,23 @@ def run_dedup(conn, city: str) -> dict:
     for eid in uf.parent:
         clusters.setdefault(uf.find(eid), []).append(eid)
 
+    # How many events each id is *currently* canonical for, i.e. which ids are
+    # already published heads. Read before the loop rewrites any of it.
+    incumbents = {
+        r["canonical_id"]: r["n"]
+        for r in conn.execute(
+            "SELECT canonical_id, COUNT(*) AS n FROM events "
+            "WHERE city=? AND canonical_id != id GROUP BY canonical_id",
+            (city,),
+        )
+    }
+
     merged = 0
+    now = now_iso()
     for cluster_ids in clusters.values():
         if len(cluster_ids) < 2:
             continue
-        # head = richest source (lowest priority number)
-        head = min(cluster_ids, key=lambda e: SOURCE_PRIORITY.get(members[e]["source_slug"], 99))
+        head = _pick_head(cluster_ids, members, incumbents)
         for eid in cluster_ids:
             conn.execute("UPDATE events SET canonical_id=? WHERE id=?", (head, eid))
             row = conn.execute("SELECT source_slug, source_url FROM events WHERE id=?", (eid,)).fetchone()
@@ -154,6 +165,18 @@ def run_dedup(conn, city: str) -> dict:
                 "INSERT OR IGNORE INTO merged_sources(canonical_id, source_slug, source_url) VALUES(?,?,?)",
                 (head, row["source_slug"], row["source_url"]),
             )
+            if eid != head:
+                # Record the loser so a downstream reference to it still resolves,
+                # and re-point any alias that used to lead here (chains collapse to
+                # one hop, so a lookup is always a single read).
+                conn.execute(
+                    "INSERT INTO event_aliases(alias_id, canonical_id, noted_at) VALUES(?,?,?) "
+                    "ON CONFLICT(alias_id) DO UPDATE SET canonical_id=excluded.canonical_id",
+                    (eid, head, now),
+                )
+                conn.execute(
+                    "UPDATE event_aliases SET canonical_id=? WHERE canonical_id=?", (head, eid)
+                )
         _fill_head_from_members(conn, head, [e for e in cluster_ids if e != head])
         merged += len(cluster_ids) - 1
 
@@ -162,6 +185,29 @@ def run_dedup(conn, city: str) -> dict:
         "UPDATE events SET canonical_id=id WHERE canonical_id NOT IN (SELECT id FROM events)"
     )
     return {"blocks": len(blocks), "merged": merged, "near_misses": near_misses}
+
+
+def _pick_head(cluster_ids: list[str], members: dict[str, dict], incumbents: dict[str, int]) -> str:
+    """Choose the id a cluster collapses onto — incumbent first, then source richness.
+
+    Source priority alone used to decide this, re-evaluated from scratch every
+    run. That is unstable in a way that reaches users: the day a higher-priority
+    source starts carrying an event we already had, the head changes, the old id
+    stops being exported, and every stored reference to it downstream (Gobento
+    bookmarks, saved plans) dangles. The event is the same event; only our
+    arbitrary choice of representative moved.
+
+    So an id that is already the head of a cluster keeps the job, even against a
+    richer source — the *content* still gets upgraded either way, because
+    `_fill_head_from_members` copies the better fields onto whichever id wins.
+    Priority only breaks ties among ids with no incumbency, and the id itself
+    breaks the remaining ties (ULIDs sort by creation time, so the oldest wins —
+    stability again, and it makes the run reproducible).
+    """
+    return min(
+        cluster_ids,
+        key=lambda e: (-incumbents.get(e, 0), SOURCE_PRIORITY.get(members[e]["source_slug"], 99), e),
+    )
 
 
 def _fill_head_from_members(conn, head_id: str, member_ids: list[str]) -> None:

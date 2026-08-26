@@ -26,11 +26,11 @@ def main(argv: list[str] | None = None) -> int:
     p_venues = sub.add_parser("venues-bootstrap", help="pull venue POIs from Overpass/OSM")
     p_venues.add_argument("--city", default="berlin")
 
-    p_sync = sub.add_parser("sync-d1", help="push the export window into Gobento's Cloudflare D1")
-    p_sync.add_argument("--city", default="berlin")
-    p_sync.add_argument("--no-prune", action="store_true",
-                        help="upsert only; don't delete D1 rows missing from this export "
-                             "(use for limited/partial scrapes)")
+    p_publish = sub.add_parser("publish", help="upload the exported feed to Cloudflare R2")
+    p_publish.add_argument("--city", default="berlin")
+    p_publish.add_argument("--no-prune", action="store_true",
+                           help="upload only; don't delete de-listed objects "
+                                "(use for limited/partial scrapes)")
 
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -58,10 +58,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(export_city(conn, args.city, cfg.PUBLIC_DIR)))
         return 0
 
-    if args.cmd == "sync-d1":
-        from .sync_d1 import sync
+    if args.cmd == "publish":
+        from .publish_r2 import publish
 
-        print(json.dumps(sync(args.city, prune=not args.no_prune)))
+        print(json.dumps(publish(args.city, prune=not args.no_prune)))
         return 0
 
     if args.cmd == "venues-bootstrap":

@@ -25,6 +25,7 @@ from .export import export_city
 from .fetch import Fetcher
 from .images import backfill_images
 from .linkcheck import check_images, check_links
+from .stock_photos import backfill_stock_photos
 from .verify import run_sanity_checks
 from .normalise.convert import to_event
 from .venues import VenueIndex, seed_venues
@@ -159,6 +160,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     image_check_stats = check_images(conn, fetcher, city.slug)
     conn.commit()
 
+    # Last of the image phases, deliberately: it fills only what both the source
+    # and the page scan failed to provide, and `check_images` above can null an
+    # image_url it finds dead — which creates work for this.
+    stock_stats = backfill_stock_photos(conn, city.slug)
+    conn.commit()
+
     sanity_stats = run_sanity_checks(conn, city.slug)
     conn.commit()
 
@@ -177,6 +184,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,
+        "stock_photos": stock_stats,
         "links": link_stats,
         "image_checks": image_check_stats,
         "sanity": sanity_stats,

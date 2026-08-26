@@ -92,27 +92,39 @@ jobs:
           path: data
           key: pipeline-data-${{ github.run_id }}
 
-      # push the export window into Gobento's Cloudflare D1 (city_events table).
-      # runs only after the freshness gate above passes, so a zero/failed scrape
-      # never reaches D1 (and sync-d1 itself refuses to prune on empty results).
-      - name: Sync to D1
+      # Publish the exported feed to Cloudflare R2 — the objects Gobento reads.
+      # Runs only after the freshness gate above passes, so a zero/failed scrape
+      # never reaches the bucket (and publish itself refuses to prune on empty
+      # results). Uploads are a diff: content-addressed names mean a steady-state
+      # run ships only the events that actually changed, plus feed and manifest.
+      - name: Publish feed to R2
         env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
         run: |
-          # A limited (dev) scrape only covers part of the window, so sync
-          # upsert-only (--no-prune): it adds/updates its rows without deleting
-          # the real rows it never re-emitted. Full runs prune as normal.
+          # A limited (dev) scrape only covers part of the window, so publish
+          # upload-only (--no-prune): it adds its objects without de-listing the
+          # real ones it never re-emitted. Full runs prune as normal.
           ARGS="--city berlin"
           if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
-            echo "::notice::DEV MODE — syncing upsert-only (--no-prune)"
+            echo "::notice::DEV MODE — publishing upload-only (--no-prune)"
             ARGS="$ARGS --no-prune"
           fi
-          python -m pipeline sync-d1 $ARGS
+          python -m pipeline publish $ARGS
 
-      # The exported feed is NOT committed: D1 (above) is its only consumer, and
+      # A failed run is invisible to users — they keep seeing yesterday's feed,
+      # because the last manifest still resolves. Say so loudly here; the client
+      # also surfaces `generated_at`, so staleness shows in the UI too.
+      - name: Report failure
+        if: failure()
+        run: |
+          echo "::error::Scrape failed — the published feed is now stale."
+          echo "::error::Clients keep serving the last good manifest until this succeeds."
+
+      # The exported feed is NOT committed: R2 (above) is its only consumer, and
       # public/berlin/ is gitignored. What still needs a commit is the schedule
       # itself — GitHub disables a scheduled workflow after 60 days without repo
       # activity — so land one only when the branch is actually going stale.

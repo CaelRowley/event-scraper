@@ -62,3 +62,39 @@ def test_cross_language_same_venue_same_time():
                               lat=52.5112, lon=13.4500))
     stats = run_dedup(conn, "berlin")
     assert stats["merged"] == 1
+
+
+def test_incumbent_head_survives_a_richer_source_arriving_later():
+    """A stored event id must not change just because a better source shows up.
+
+    Gobento persists our event id on bookmarks and saved plans, so re-picking the
+    head by source priority every run silently orphans those rows.
+    """
+    conn = connect(":memory:")
+    # Day 1: only rausgegangen carries it — it becomes the head of a 2-member cluster.
+    upsert_event(conn, _event("rausgegangen", "x", "Klubnacht", "Berghain", "2199-06-13T21:00:00Z", "2199-06-13"))
+    upsert_event(conn, _event("livegigs", "y", "Klubnacht!", "Berghain / Panorama Bar", "2199-06-13T21:00:00Z", "2199-06-13"))
+    run_dedup(conn, "berlin")
+    original_head = conn.execute(
+        "SELECT canonical_id FROM events WHERE source_slug='rausgegangen'"
+    ).fetchone()["canonical_id"]
+
+    # Day 2: `ra` (higher priority) starts carrying the same event.
+    upsert_event(conn, _event("ra", "1", "Klubnacht", "Berghain", "2199-06-13T21:00:00Z", "2199-06-13"))
+    run_dedup(conn, "berlin")
+
+    heads = {r["canonical_id"] for r in conn.execute("SELECT canonical_id FROM events")}
+    assert len(heads) == 1
+    assert heads.pop() == original_head, "incumbent head was replaced; stored ids would dangle"
+
+
+def test_demoted_ids_are_recorded_as_aliases():
+    conn = connect(":memory:")
+    upsert_event(conn, _event("ra", "1", "Klubnacht", "Berghain", "2199-06-13T21:00:00Z", "2199-06-13"))
+    upsert_event(conn, _event("rausgegangen", "x", "Klubnacht!", "Berghain / Panorama Bar", "2199-06-13T21:00:00Z", "2199-06-13"))
+    run_dedup(conn, "berlin")
+
+    head = conn.execute("SELECT canonical_id FROM events LIMIT 1").fetchone()["canonical_id"]
+    loser = conn.execute("SELECT id FROM events WHERE id != ?", (head,)).fetchone()["id"]
+    alias = conn.execute("SELECT canonical_id FROM event_aliases WHERE alias_id=?", (loser,)).fetchone()
+    assert alias is not None and alias["canonical_id"] == head

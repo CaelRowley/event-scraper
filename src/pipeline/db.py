@@ -60,6 +60,22 @@ CREATE TABLE IF NOT EXISTS merged_sources(
   canonical_id TEXT NOT NULL, source_slug TEXT NOT NULL, source_url TEXT NOT NULL,
   PRIMARY KEY(canonical_id, source_slug, source_url)
 );
+-- Durable id-continuity ledger: every event id ever folded into another, mapped
+-- to the id that survived.
+--
+-- Downstream (Gobento) stores our event id on user rows — a bookmark, a saved
+-- plan. Dedup used to re-pick a cluster head by source priority on every run, so
+-- the day a richer source appeared the surviving id changed and every stored
+-- reference silently pointed at nothing. `_pick_head` now keeps the incumbent,
+-- and this table records the losers so a reference to a superseded id still
+-- resolves. Rows outlive the events themselves — deliberately, since that is
+-- exactly when the mapping is needed.
+CREATE TABLE IF NOT EXISTS event_aliases(
+  alias_id TEXT PRIMARY KEY,
+  canonical_id TEXT NOT NULL,
+  noted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_aliases_canonical ON event_aliases(canonical_id);
 CREATE TABLE IF NOT EXISTS llm_queue(
   event_id TEXT PRIMARY KEY, queued_at TEXT NOT NULL
 );
@@ -98,6 +114,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "link_dead_at" not in cols:
         # set when the source link is confirmed dead; excluded from export, never deleted
         conn.execute("ALTER TABLE events ADD COLUMN link_dead_at TEXT")
+    if "stock_image_url" not in cols:
+        # Commons stand-in for events the source gave no image for (stock_photos.py).
+        # NULL means "no photo found yet", never "we gave up" — the attempt
+        # timestamp is what rate-limits retries, so a miss is retried later
+        # instead of being frozen onto a fallback image forever.
+        conn.execute("ALTER TABLE events ADD COLUMN stock_image_url TEXT")
+        conn.execute("ALTER TABLE events ADD COLUMN stock_attribution TEXT")
+        conn.execute("ALTER TABLE events ADD COLUMN stock_attempted_at TEXT")
 
 
 # --- crawl ledger -----------------------------------------------------------
