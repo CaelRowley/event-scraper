@@ -18,7 +18,16 @@ manifest carries a hash of its own bytes in its name, which means:
 
 Deletion is deferred rather than immediate: an object dropped from the manifest
 stays for GRACE_HOURS, because clients and CDN nodes still hold the previous
-manifest and would otherwise 404 on objects it names.
+manifest and would otherwise 404 on objects it names. The clock starts when the
+object is *de-listed*, not when it was uploaded — a small ledger
+(`<city>/.delisted.json`) records the first run that stopped naming each key,
+and only keys that have been absent for the whole window are deleted. Measuring
+from upload time instead would delete a months-old object the moment it left
+the manifest, which is precisely the 404 the grace window exists to prevent.
+
+A run that looks like a failed scrape — an empty feed, or far fewer objects than
+the bucket holds — never prunes. The workflow's freshness gate is the first line
+of defence; this is the second.
 
 Env (skips with a log + exit 0 if unset, so local runs never fail):
   R2_ACCOUNT_ID          Cloudflare account id (used to build the S3 endpoint)
@@ -30,6 +39,7 @@ Env (skips with a log + exit 0 if unset, so local runs never fail):
 
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import os
@@ -47,6 +57,11 @@ MAX_WORKERS = 8
 # lifetime plus any client's sync interval, or a client holding the previous
 # manifest will ask for an object that no longer exists.
 GRACE_HOURS = 48
+
+# Pruning is refused when the local export holds fewer than this fraction of the
+# objects already in the bucket. A healthy day changes a few hundred of ~6,400
+# objects; anything that halves the set is a broken scrape, not a quiet week.
+MIN_KEEP_RATIO = 0.5
 
 # Cache lifetimes per object kind. The manifest is revalidated constantly and
 # everything else is immutable — that split is the whole caching strategy.
@@ -94,12 +109,39 @@ def _list_existing(s3, bucket: str, prefix: str) -> dict[str, datetime]:
         token = page.get("NextContinuationToken")
 
 
+def _ledger_key(city: str) -> str:
+    return f"{city}/.delisted.json"
+
+
+def _load_ledger(s3, bucket: str, city: str) -> dict[str, str]:
+    """`{key: iso-time first seen missing from the manifest}`; empty if absent."""
+    try:
+        body = s3.get_object(Bucket=bucket, Key=_ledger_key(city))["Body"].read()
+    except s3.exceptions.NoSuchKey:
+        return {}
+    try:
+        ledger = json.loads(body)
+    except ValueError:
+        log.warning("unreadable de-list ledger for %s — starting a fresh one", city)
+        return {}
+    return {k: v for k, v in ledger.items() if isinstance(v, str)}
+
+
+def _save_ledger(s3, bucket: str, city: str, ledger: dict[str, str]) -> None:
+    s3.put_object(
+        Bucket=bucket, Key=_ledger_key(city),
+        Body=json.dumps(dict(sorted(ledger.items())), separators=(",", ":")).encode(),
+        ContentType="application/json", CacheControl="no-store",
+    )
+
+
 def _local_objects(city_dir: Path, city: str) -> dict[str, Path]:
     """Publishable files under the city directory, keyed by their bucket key.
 
     Only the feed artefacts ship. The demo export (`index.json`, the per-day
     slices) stays local — it is a different product with a different shape, and
-    publishing it would double the bucket for no reader.
+    publishing it would double the bucket for no reader. The de-list ledger is
+    bucket-side state, never a local file, so it is not among these either.
     """
     keys: dict[str, Path] = {}
     manifest = city_dir / "manifest.json"
@@ -149,7 +191,9 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
         return {"skipped": True, "reason": "no-bucket"}
 
     local = _local_objects(city_dir, city)
+    ledger_key = _ledger_key(city)
     existing = _list_existing(s3, bucket, f"{city}/")
+    existing.pop(ledger_key, None)
 
     # Content-addressed names mean "already present" implies "identical", so the
     # only things worth uploading are new names — plus the manifest, whose name
@@ -168,23 +212,66 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     _put(s3, bucket, manifest_key, manifest_path)
 
     deleted = 0
+    prune_skipped = None
     if prune:
-        deleted = _prune(s3, bucket, city, set(local), existing)
+        prune_skipped = _unsafe_to_prune(manifest_path, len(local), len(existing))
+        if prune_skipped:
+            log.warning("refusing to prune %s: %s", city, prune_skipped)
+        else:
+            now = datetime.now(timezone.utc)
+            ledger = _note_delisted(_load_ledger(s3, bucket, city), set(local), existing, now)
+            deleted = _prune(s3, bucket, ledger, now)
+            _save_ledger(s3, bucket, city, ledger)
 
     log.info("published %s: %d uploaded, %d already current, %d pruned",
              city, uploaded, len(local) - len(todo) - 1, deleted)
     return {"uploaded": uploaded, "unchanged": len(local) - len(todo) - 1,
-            "pruned": deleted, "objects": len(local)}
+            "pruned": deleted, "objects": len(local), "prune_skipped": prune_skipped}
 
 
-def _prune(s3, bucket: str, city: str, keep: set[str], existing: dict[str, datetime]) -> int:
-    """Delete de-listed objects older than the grace window.
+def _unsafe_to_prune(manifest_path: Path, local_count: int, existing_count: int) -> str | None:
+    """Why this run must not delete anything, or None when it is safe to."""
+    try:
+        count = json.loads(manifest_path.read_text())["feed"]["count"]
+    except (ValueError, KeyError, TypeError):
+        return "manifest has no feed count"
+    if not count:
+        return "the feed is empty"
+    if existing_count and local_count < existing_count * MIN_KEEP_RATIO:
+        return f"export holds {local_count} objects against {existing_count} in the bucket"
+    return None
+
+
+def _note_delisted(ledger: dict[str, str], keep: set[str], existing: dict[str, datetime],
+                   now: datetime) -> dict[str, str]:
+    """Advance the ledger: stamp newly de-listed keys, forget keys that are back."""
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = {k: t for k, t in ledger.items() if k in existing and k not in keep}
+    for key in existing:
+        if key not in keep:
+            out.setdefault(key, stamp)
+    return out
+
+
+def _prune(s3, bucket: str, ledger: dict[str, str], now: datetime) -> int:
+    """Delete objects de-listed for longer than the grace window; drop them from the ledger.
 
     The age check is what makes this safe: a client that fetched the previous
-    manifest a minute ago is still entitled to the objects it named.
+    manifest a minute ago is still entitled to the objects it named, however old
+    those objects are.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=GRACE_HOURS)
-    stale = [k for k, modified in existing.items() if k not in keep and modified < cutoff]
+    cutoff = now - timedelta(hours=GRACE_HOURS)
+    stale = []
+    for key, stamped in ledger.items():
+        try:
+            since = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+        except ValueError:
+            since = now  # unreadable stamp: restart its clock rather than delete
+            ledger[key] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if since < cutoff:
+            stale.append(key)
     for chunk in (stale[i:i + 1000] for i in range(0, len(stale), 1000)):
         s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk]})
+    for key in stale:
+        ledger.pop(key, None)
     return len(stale)

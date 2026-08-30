@@ -178,3 +178,22 @@ def test_budget_caps_the_number_of_lookups_per_run():
     conn.commit()
     stats = backfill_stock_photos(conn, "berlin", budget=2)
     assert stats["attempted"] == 2
+
+
+@respx.mock
+def test_backfill_goes_through_the_pipeline_fetcher_when_given_one():
+    """Sharing the run's Fetcher means Commons answers are cached like every other fetch."""
+    from pipeline.fetch import Fetcher
+    route = respx.get(COMMONS_API).mock(return_value=_reply([_commons_page(0, "f.jpg")]))
+    conn = connect(":memory:")
+    upsert_event(conn, _ev("1", "Fetched Event"))
+    conn.commit()
+    fetcher = Fetcher(cache_path=None)
+    try:
+        stats = backfill_stock_photos(conn, "berlin", fetcher=fetcher)
+    finally:
+        fetcher.close()
+    assert stats["resolved"] == 1
+    assert route.called
+    assert fetcher.requests_made >= 1, "the lookup must be counted by the shared fetcher"
+    assert route.calls[0].request.headers["User-Agent"].startswith("events-pipeline")

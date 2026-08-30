@@ -51,8 +51,8 @@ jobs:
           TICKETMASTER_KEY: ${{ secrets.TICKETMASTER_KEY || secrets.TICKET_MASTER_KEY }}
           MODE: ${{ github.event.inputs.mode || 'full' }}
           # repo variable (Settings → Variables): set to a positive number for a
-          # quick dev smoke run — caps events/source and makes the D1 sync
-          # upsert-only (see below). 0 (or unset) = normal full scrape.
+          # quick dev smoke run — caps events/source and makes the R2 publish
+          # upload-only (see below). 0 (or unset) = normal full scrape.
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
         run: |
           set -o pipefail
@@ -94,9 +94,10 @@ jobs:
 
       # Publish the exported feed to Cloudflare R2 — the objects Gobento reads.
       # Runs only after the freshness gate above passes, so a zero/failed scrape
-      # never reaches the bucket (and publish itself refuses to prune on empty
-      # results). Uploads are a diff: content-addressed names mean a steady-state
-      # run ships only the events that actually changed, plus feed and manifest.
+      # never reaches the bucket (and publish itself refuses to prune when the
+      # feed is empty or far smaller than what the bucket holds). Uploads are a
+      # diff: content-addressed names mean a steady-state run ships only the
+      # events that actually changed, plus feed and manifest.
       - name: Publish feed to R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}

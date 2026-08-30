@@ -140,19 +140,120 @@ def test_publish_before_export_is_a_clear_error(tmp_path):
         publish_r2.publish("berlin", tmp_path)
 
 
-def test_prune_deletes_delisted_objects_once_they_age_out(r2, tmp_path):
+def _delist_b(conn, tmp_path):
+    conn.execute("DELETE FROM occurrences WHERE event_id IN (SELECT id FROM events WHERE title='B')")
+    conn.execute("DELETE FROM events WHERE title='B'")
+    export_city(conn, "berlin", tmp_path)
+
+
+def _ledger(s3):
+    body = s3.get_object(Bucket=BUCKET, Key="berlin/.delisted.json")["Body"].read()
+    return json.loads(body)
+
+
+def test_grace_is_measured_from_delisting_not_upload(r2, tmp_path, monkeypatch):
+    """An object uploaded long ago but de-listed today is still in use — keep it."""
     from datetime import datetime, timedelta, timezone
-    _seed_and_export(tmp_path, ["A", "B"])
+    conn = _seed_and_export(tmp_path, ["A", "B"])
     publish_r2.publish("berlin", tmp_path)
+    event_keys_before = {k for k in _keys(r2) if k.startswith("berlin/events/")}
 
-    keep = {"berlin/manifest.json"}
-    stale_key = next(k for k in _keys(r2) if k.startswith("berlin/events/"))
-    old = datetime.now(timezone.utc) - timedelta(hours=publish_r2.GRACE_HOURS + 1)
-    recent = datetime.now(timezone.utc)
+    # Pretend the upload happened well before the grace window …
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=publish_r2.GRACE_HOURS * 3)
+    real_list = publish_r2._list_existing
+    monkeypatch.setattr(publish_r2, "_list_existing",
+                        lambda *a: {k: long_ago for k in real_list(*a)})
 
-    deleted = publish_r2._prune(
-        r2, BUCKET, "berlin", keep,
-        {stale_key: old, "berlin/events/fresh.json": recent},
-    )
-    assert deleted == 1, "only the aged-out object should go"
-    assert stale_key not in _keys(r2)
+    # … then de-list B today.
+    _delist_b(conn, tmp_path)
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["pruned"] == 0
+    assert event_keys_before <= _keys(r2), "B's object must survive its grace window"
+    ledger = _ledger(r2)
+    assert len(ledger) == 2, f"B's event object and the old feed should be stamped: {ledger}"
+    assert all(k in ledger for k in event_keys_before - _keys_named_by_manifest(r2))
+
+
+def _keys_named_by_manifest(s3):
+    manifest = json.loads(s3.get_object(Bucket=BUCKET, Key="berlin/manifest.json")["Body"].read())
+    named = {f"berlin/{manifest['feed']['url']}", f"berlin/{manifest['geo']['url']}"}
+    feed_key = f"berlin/{manifest['feed']['url']}"
+    import gzip
+    rows = json.loads(gzip.decompress(s3.get_object(Bucket=BUCKET, Key=feed_key)["Body"].read()))
+    named |= {f"berlin/events/{r['event_id']}.{r['h']}.json" for r in rows}
+    return named
+
+
+def test_prune_deletes_objects_delisted_for_the_whole_grace_window(r2, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    conn = _seed_and_export(tmp_path, ["A", "B"])
+    publish_r2.publish("berlin", tmp_path)
+    _delist_b(conn, tmp_path)
+    publish_r2.publish("berlin", tmp_path)          # stamps B as de-listed now
+
+    # Age the ledger past the window and publish again.
+    old = (datetime.now(timezone.utc) - timedelta(hours=publish_r2.GRACE_HOURS + 1)
+           ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    aged = {k: old for k in _ledger(r2)}
+    publish_r2._save_ledger(r2, BUCKET, "berlin", aged)
+
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["pruned"] == len(aged)
+    assert sum(k.startswith("berlin/events/") for k in _keys(r2)) == 1
+    assert _ledger(r2) == {}, "pruned keys leave the ledger"
+    assert "berlin/.delisted.json" in _keys(r2), "the ledger itself is never pruned"
+
+
+def test_relisted_object_is_forgotten_by_the_ledger(r2, tmp_path):
+    conn = _seed_and_export(tmp_path, ["A", "B"])
+    publish_r2.publish("berlin", tmp_path)
+    conn.execute("UPDATE events SET title='B2' WHERE title='B'")
+    export_city(conn, "berlin", tmp_path)
+    publish_r2.publish("berlin", tmp_path)
+    assert _ledger(r2), "the old B object and feed are de-listed"
+    conn.execute("UPDATE events SET title='B' WHERE title='B2'")
+    export_city(conn, "berlin", tmp_path)
+    publish_r2.publish("berlin", tmp_path)
+    assert not any(k.endswith(".json") and "events/" in k for k in _ledger(r2)
+                   if k in _keys_named_by_manifest(r2)), "objects named again drop off the ledger"
+
+
+def test_ledger_is_never_uploaded_from_disk(r2, tmp_path):
+    (tmp_path / "berlin").mkdir(parents=True, exist_ok=True)
+    _seed_and_export(tmp_path, ["A"])
+    (tmp_path / "berlin" / ".delisted.json").write_text("{}")
+    assert "berlin/.delisted.json" not in publish_r2._local_objects(tmp_path / "berlin", "berlin")
+
+
+def test_empty_feed_never_prunes(r2, tmp_path):
+    """A zero-event export is a failed scrape until proven otherwise."""
+    conn = _seed_and_export(tmp_path, ["A", "B"])
+    publish_r2.publish("berlin", tmp_path)
+    conn.execute("DELETE FROM occurrences")
+    conn.execute("DELETE FROM events")
+    export_city(conn, "berlin", tmp_path)
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["pruned"] == 0
+    assert stats["prune_skipped"]
+    assert _ledger(r2) == {}, "a refused prune must not start anyone's grace clock"
+
+
+def test_drastically_smaller_export_never_prunes(r2, tmp_path):
+    conn = _seed_and_export(tmp_path, [f"E{i}" for i in range(6)])
+    publish_r2.publish("berlin", tmp_path)
+    conn.execute("DELETE FROM occurrences WHERE event_id IN "
+                 "(SELECT id FROM events WHERE title != 'E0')")
+    conn.execute("DELETE FROM events WHERE title != 'E0'")
+    export_city(conn, "berlin", tmp_path)
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["prune_skipped"] and "objects against" in stats["prune_skipped"]
+
+
+def test_no_prune_leaves_the_ledger_untouched(r2, tmp_path):
+    conn = _seed_and_export(tmp_path, ["A", "B"])
+    publish_r2.publish("berlin", tmp_path)
+    before = _ledger(r2)
+    _delist_b(conn, tmp_path)
+    stats = publish_r2.publish("berlin", tmp_path, prune=False)
+    assert stats["prune_skipped"] is None and stats["pruned"] == 0
+    assert _ledger(r2) == before, "--no-prune must not touch the ledger"

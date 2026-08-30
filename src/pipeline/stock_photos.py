@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from .categorise.taxonomy import LABELS
 from .db import now_iso
+from .fetch import Fetcher, RateSpec
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +55,12 @@ LOOKUP_BUDGET = 250
 
 # How long before a miss is worth another try.
 RETRY_DAYS = 14
+
+# Lookups overlap this many at a time. Commons is one host, so the Fetcher's
+# per-domain spacing still meters request *starts*; the gain is not waiting on
+# each response before issuing the next.
+MAX_WORKERS = 4
+COMMONS_RATE = RateSpec(min_interval=0.25, jitter=(0.0, 0.1))
 
 # Last resort when Commons returns nothing at all. Deliberately NOT persisted —
 # see the module docstring.
@@ -131,7 +139,25 @@ def _attribution(info: dict) -> dict | None:
     }
 
 
-def search_many(client: httpx.Client, query: str) -> list[tuple[str, dict | None]]:
+class _CommonsClient:
+    """The pipeline `Fetcher` behind the `client.get(url, params=, timeout=)` shape
+    the lookups use — so they share its RFC-9111 cache (a repeated query costs
+    no request) and its retries, without every call site spelling the options.
+
+    `check_robots=False` on purpose: Commons' robots.txt disallows `/w/` for
+    crawlers, but this is the API it publishes for exactly this use. We are
+    identified to it by User-Agent as its etiquette asks.
+    """
+
+    def __init__(self, fetcher: Fetcher):
+        self._fetcher = fetcher
+
+    def get(self, url: str, **kwargs) -> httpx.Response:
+        return self._fetcher.get(url, rate=COMMONS_RATE, user_agent=USER_AGENT,
+                                 check_robots=False, **kwargs)
+
+
+def search_many(client, query: str) -> list[tuple[str, dict | None]]:
     """Every allowed-mime candidate for one query, ranked by relevance.
 
     The full ranked list, not just the top hit: one query commonly matches many
@@ -176,21 +202,37 @@ def search_many(client: httpx.Client, query: str) -> list[tuple[str, dict | None
     return out
 
 
-def resolve(client: httpx.Client, event, claimed: set[str]) -> tuple[str, dict | None] | None:
+def candidates(client, event, claimed: set[str]) -> list[tuple[str, dict | None]]:
+    """Ranked photos for one event, stopping at the first query with an unclaimed hit.
+
+    The whole ranked list comes back, not just the winner: lookups run
+    concurrently, so `claimed` is a snapshot, and the caller re-picks against
+    the live set once results are in.
+    """
+    out: list[tuple[str, dict | None]] = []
+    for query in query_candidates(event):
+        hits = search_many(client, query)
+        out.extend(hits)
+        if any(url not in claimed for url, _ in hits):
+            break
+    return out
+
+
+def pick(ranked: list[tuple[str, dict | None]], claimed: set[str]) -> tuple[str, dict | None] | None:
+    """First unclaimed candidate; failing that the top one — a repeat still beats a blank card."""
+    for url, attribution in ranked:
+        if url not in claimed:
+            return url, attribution
+    return ranked[0] if ranked else None
+
+
+def resolve(client, event, claimed: set[str]) -> tuple[str, dict | None] | None:
     """Find an unclaimed photo for one event, or None if Commons had nothing.
 
     Returns None rather than the emergency fallback so the caller can decline to
     store a miss — see the module docstring.
     """
-    best = None
-    for query in query_candidates(event):
-        for url, attribution in search_many(client, query):
-            if best is None:
-                best = (url, attribution)
-            if url not in claimed:
-                return url, attribution
-    # Everything relevant is taken: a repeat still beats a blank card.
-    return best
+    return pick(candidates(client, event, claimed), claimed)
 
 
 def _due(last_attempt: str | None, now: datetime) -> bool:
@@ -203,8 +245,13 @@ def _due(last_attempt: str | None, now: datetime) -> bool:
     return now - seen > timedelta(days=RETRY_DAYS)
 
 
-def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET) -> dict:
-    """Resolve Commons photos for imageless events in the feed window."""
+def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
+                          fetcher: Fetcher | None = None) -> dict:
+    """Resolve Commons photos for imageless events in the feed window.
+
+    Pass the run's `Fetcher` to share its HTTP cache and rate limiting; without
+    one a plain client is used (tests, ad-hoc runs).
+    """
     now = datetime.now(timezone.utc)
 
     claimed = {
@@ -231,9 +278,18 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET) -> dict:
         return {"considered": len(rows), "attempted": 0, "resolved": 0}
 
     resolved = 0
-    with httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True) as client:
-        for row in due:
-            hit = resolve(client, row, claimed)
+    plain = None
+    if fetcher is None:
+        plain = httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True)
+    client = plain if plain is not None else _CommonsClient(fetcher)
+    try:
+        # HTTP fans out; the SQLite connection stays on this thread. `claimed` is
+        # read by the workers as a snapshot and re-checked here in order, so two
+        # concurrent lookups landing on the same photo still end up distinct.
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="commons") as pool:
+            ranked = list(pool.map(lambda row: candidates(client, row, claimed), due))
+        for row, options in zip(due, ranked):
+            hit = pick(options, claimed)
             # Record the attempt either way — that is what stops a hopeless event
             # being retried on every single run.
             conn.execute(
@@ -248,6 +304,9 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET) -> dict:
             )
             claimed.add(url)
             resolved += 1
+    finally:
+        if plain is not None:
+            plain.close()
     conn.commit()
 
     log.info("stock photos: %d considered, %d attempted, %d resolved",

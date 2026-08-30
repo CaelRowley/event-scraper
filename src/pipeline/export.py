@@ -76,7 +76,7 @@ def _hash(payload) -> str:
 
 
 def _stock_url(row, keys) -> str | None:
-    """The Commons photo resolved for this event, if images.py found one."""
+    """The Commons photo resolved for this event, if stock_photos.py found one."""
     return row["stock_image_url"] if "stock_image_url" in keys else None
 
 
@@ -136,7 +136,7 @@ def _row_to_item(row) -> dict:
         "geo": {"lat": row["lat"], "lon": row["lon"]} if row["lat"] is not None else None,
         "price": json.loads(row["price_json"] or "{}"),
         # Three tiers, best first: the source's own image; a Commons photo of the
-        # venue (resolved in images.py, licensed and attributed); and only then a
+        # venue (resolved in stock_photos.py, licensed and attributed); and only then a
         # decorative stand-in. `image_url` is what a card shows, so the Commons
         # result is promoted into it rather than kept in a field every consumer
         # would have to know to fall back to.
@@ -175,13 +175,19 @@ def build_feed(conn, city: str, items: list[dict], meta: dict) -> dict:
     Returns `{"manifest": ..., "feed": (name, payload), "geo": (name, payload),
     "events": {name: payload}}`, where each name already carries its content hash.
     """
+    # Two views of the same ledger: per event (inside its object) and the flat
+    # alias → canonical map in the manifest. The map is what a client actually
+    # needs — it holds a superseded id from a bookmark and has nothing else to
+    # look it up by, so an index keyed by the old id is the only usable shape.
     aliases: dict[str, list[str]] = {}
+    alias_map: dict[str, str] = {}
     for r in conn.execute(
         "SELECT a.alias_id, a.canonical_id FROM event_aliases a "
         "JOIN events e ON e.id = a.canonical_id WHERE e.city = ?",
         (city,),
     ):
         aliases.setdefault(r["canonical_id"], []).append(r["alias_id"])
+        alias_map[r["alias_id"]] = r["canonical_id"]
 
     # One object per event, carrying every occurrence of it plus the heavy fields.
     by_event: dict[str, list[dict]] = {}
@@ -252,6 +258,9 @@ def build_feed(conn, city: str, items: list[dict], meta: dict) -> dict:
         "geo": {"url": f"geo.{geo_hash}.json.gz", "hash": geo_hash, "count": len(geo_rows)},
         "days": [{"date": d, "count": len(ids)} for d, ids in sorted(days.items())],
         "categories": dict(sorted(categories.items(), key=lambda kv: -kv[1]["count"])),
+        # Superseded event id → the id that replaced it. Optional for readers;
+        # additive to the schema, so no version bump.
+        "aliases": dict(sorted(alias_map.items())),
     }
     return {
         "manifest": manifest,
@@ -267,6 +276,23 @@ def _write_json(path: Path, payload, *, gzipped: bool) -> None:
     # mtime=0 so identical content compresses to identical bytes — otherwise the
     # gzip header timestamp would make every publish look like a change.
     path.write_bytes(gzip.compress(raw, mtime=0) if gzipped else raw)
+
+
+def _remove_superseded(city_dir: Path, built: dict) -> None:
+    """Drop hashed objects from earlier exports that this manifest no longer names.
+
+    Content-addressed names never collide, so an old `feed.<hash>` or
+    `events/<id>.<hash>` left on disk is harmless to readers — but `publish`
+    uploads the whole directory, so on a persistent checkout every superseded
+    object would be re-uploaded, counted as current, and never pruned. The
+    bucket would only ever grow. Deleting locally is what lets it shrink.
+    """
+    keep = {built["feed"][0], built["geo"][0], *built["events"]}
+    candidates = [*city_dir.glob("feed.*.json.gz"), *city_dir.glob("geo.*.json.gz"),
+                  *(city_dir / "events").glob("*.json")]
+    for path in candidates:
+        if path.relative_to(city_dir).as_posix() not in keep:
+            path.unlink()
 
 
 def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
@@ -314,6 +340,7 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
     # The published feed. Written alongside the demo export so `publish` is a pure
     # upload of a directory and can be re-run without re-querying.
     built = build_feed(conn, city, items, meta)
+    _remove_superseded(city_dir, built)
     _write_json(city_dir / built["feed"][0], built["feed"][1], gzipped=True)
     _write_json(city_dir / built["geo"][0], built["geo"][1], gzipped=True)
     for name, payload in built["events"].items():
