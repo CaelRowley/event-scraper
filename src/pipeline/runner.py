@@ -163,7 +163,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     # Last of the image phases, deliberately: it fills only what both the source
     # and the page scan failed to provide, and `check_images` above can null an
     # image_url it finds dead — which creates work for this.
-    stock_stats = backfill_stock_photos(conn, city.slug)
+    stock_stats = backfill_stock_photos(conn, city.slug, fetcher=fetcher)
     conn.commit()
 
     sanity_stats = run_sanity_checks(conn, city.slug)

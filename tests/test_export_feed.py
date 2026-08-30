@@ -131,3 +131,27 @@ def test_export_city_writes_manifest_last_and_gzips_the_feed(tmp_path: Path):
     assert len(rows) == manifest["feed"]["count"]
     # every object the manifest names is on disk
     assert (city / manifest["geo"]["url"]).exists()
+
+
+def test_manifest_carries_an_alias_to_canonical_map():
+    conn = _seed()
+    canonical = conn.execute("SELECT id FROM events WHERE title='Has Image'").fetchone()["id"]
+    conn.execute("INSERT INTO event_aliases(alias_id, canonical_id, noted_at) VALUES (?,?,?)",
+                 ("old-id", canonical, "2026-01-01T00:00:00Z"))
+    built = _build(conn)
+    assert built["manifest"]["aliases"] == {"old-id": canonical}
+    obj = next(v for v in built["events"].values() if v["event_id"] == canonical)
+    assert obj["aliases"] == ["old-id"]
+
+
+def test_export_city_removes_superseded_hashed_objects(tmp_path: Path):
+    conn = _seed()
+    export_city(conn, "berlin", tmp_path)
+    city = tmp_path / "berlin"
+    conn.execute("UPDATE events SET title='Renamed' WHERE title='Has Image'")
+    export_city(conn, "berlin", tmp_path)
+    manifest = json.loads((city / "manifest.json").read_text())
+    assert [p.name for p in city.glob("feed.*.json.gz")] == [manifest["feed"]["url"]]
+    names = sorted(p.name for p in (city / "events").glob("*.json"))
+    assert len(names) == 3 and len({n.split(".")[0] for n in names}) == 3, \
+        f"one object per event, no stale hashes: {names}"
