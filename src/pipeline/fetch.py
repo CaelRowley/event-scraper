@@ -10,6 +10,7 @@ import logging
 import random
 import threading
 import time
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -34,6 +35,20 @@ BROWSER_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+
+def _outcome(status: int) -> str:
+    """Blocked means "the site refused us", not "the page is gone".
+
+    404/410 are ordinary and say nothing about our standing; 403/405/429/451 are
+    what a WAF returns when it has decided we are a bot or the wrong IP, and a
+    source that only ever gets those is not a quiet source, it is a shut door.
+    """
+    if status in (403, 405, 429, 451):
+        return "blocked"
+    if 200 <= status < 400:
+        return "ok"
+    return "other"
 
 
 @dataclass(frozen=True)
@@ -84,6 +99,11 @@ class Fetcher:
         self._counter_lock = threading.Lock()
         self.default_ua = user_agent
         self.requests_made = 0
+        # Per-source response tallies, keyed by thread name — the runner names each
+        # adapter thread after its slug, so attribution costs nothing here. robots.txt
+        # is fetched off `self.client` directly and never reaches this, which is what
+        # keeps a blocked source from looking healthy on the strength of one 200.
+        self._source_http: dict[str, Counter] = defaultdict(Counter)
 
     # --- politeness -----------------------------------------------------------
 
@@ -105,6 +125,11 @@ class Fetcher:
                 if wait > 0:
                     time.sleep(wait)
             self._last_request[domain] = time.monotonic()
+
+    def source_http(self) -> dict[str, dict[str, int]]:
+        """`{thread name: {ok|blocked|other: n}}` — a snapshot, safe to call at the end."""
+        with self._counter_lock:
+            return {name: dict(counts) for name, counts in self._source_http.items()}
 
     def _robots_for(self, url: str) -> Protego | None:
         domain = urlsplit(url).netloc
@@ -137,6 +162,8 @@ class Fetcher:
         resp = self.client.send(request, stream=True)
         with self._counter_lock:
             self.requests_made += 1
+            self._source_http[threading.current_thread().name][
+                _outcome(resp.status_code)] += 1
         buf = bytearray()
         try:
             for chunk in resp.iter_bytes():

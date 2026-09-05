@@ -72,12 +72,21 @@ jobs:
           python - <<'EOF'
           import json, sys
           t = json.load(open("telemetry.json"))
+          live = {k: v for k, v in t["sources"].items() if v}
           total = sum(t["sources"].values())
-          print(f"ingested {total} events from {len(t['sources'])} sources; errors: {t['errors']}")
+          print(f"ingested {total} events from {len(live)} of {len(t['sources'])} sources")
+          print(f"errors: {t['errors']}")
+          print(f"blocked: {t.get('blocked_sources', [])}")
           if total == 0:
               sys.exit("ALERT: zero events ingested — every source failed or yielded nothing")
           if len(t["errors"]) >= 3:
               sys.exit(f"ALERT: {len(t['errors'])} sources failed: {list(t['errors'])}")
+          # A source that logged an HTTP block and yielded nothing never reaches
+          # `errors` — adapters contain those and return empty. Zero yield alone is
+          # not the signal (a sitemap source with no new pages is healthy); every
+          # request being refused is.
+          if t.get("blocked_sources"):
+              sys.exit(f"ALERT: refused every request: {t['blocked_sources']}")
           EOF
 
       # save only after the freshness gate: a failed or zero-yield run must not

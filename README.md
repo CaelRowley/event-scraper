@@ -112,6 +112,25 @@ Secrets: `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY
 A de-listed object is deleted only after 48h, because clients and CDN nodes still
 hold the previous manifest.
 
+**Source health.** A source can fail without raising. Adapters contain their own
+HTTP errors, log a warning and yield nothing, so `errors` stays empty and the run
+goes green — which is how four blocked sources once shipped a healthy-looking
+feed. Zero yield is not the signal either: a sitemap source legitimately returns
+nothing on a day with no new pages, and `tip_berlin` doing exactly that looked
+identical to `livegigs` being refused 32 times.
+
+What *is* unambiguous is a source whose every request was refused. The fetcher
+tallies outcomes per source (attributed by thread name, which the runner sets to
+the slug), counting 403/405/429/451 as blocked and leaving 404/410 out of it — a
+missing page says nothing about our standing. `robots.txt` is fetched off the raw
+client, so a blocked source cannot look healthy on the strength of one 200. The
+run reports `source_http` and `blocked_sources`, and the freshness gate fails on
+the latter.
+
+Being blocked is usually about *where* the request comes from rather than what it
+says: all four of those sources answer 200 from a laptop with either User-Agent.
+GitHub's runner IPs are what the WAFs object to, so no adapter change fixes it.
+
 **Verifying a publish.** A green workflow proves the scrape yielded events and the
 uploads returned 200 — not that the redaction fired or that the published shape is
 the one this version writes; the freshness gate only counts events. Those are

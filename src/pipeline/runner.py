@@ -139,8 +139,9 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         ]
         for fut in as_completed(futures):
             r = fut.result()  # never raises — the worker contains all adapter errors
-            if r.count:
-                source_counts[r.slug] = r.count
+            # Recorded even at zero. Leaving zero-yield sources out of the dict is
+            # how four blocked sources stayed invisible in a green run.
+            source_counts[r.slug] = r.count
             tier_counts.update(r.tier_counts)
             descriptions.update(r.descriptions)
             if r.error:
@@ -177,10 +178,27 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     export_stats = export_city(conn, city.slug, cfg.PUBLIC_DIR)
 
     queue_size = conn.execute("SELECT COUNT(*) AS n FROM llm_queue").fetchone()["n"]
+    # A source can fail without raising: adapters log an HTTP block and yield
+    # nothing, so `errors` stays empty and the run looks healthy. Zero yield is not
+    # the signal either — sitemap sources legitimately return nothing on a day with
+    # no new pages. What is unambiguous is a source whose every request was refused.
+    source_http = {
+        slug: counts for slug, counts in fetcher.source_http().items()
+        if slug in {s for s, _ in tasks}
+    }
+    blocked_sources = sorted(
+        slug for slug, counts in source_http.items()
+        if counts.get("blocked", 0) and not counts.get("ok", 0)
+    )
+    if blocked_sources:
+        log.error("sources refused every request: %s", ", ".join(blocked_sources))
+
     telemetry = {
         "categorisation_mode": "ai" if ai_enabled else "rules",
         "sources": dict(source_counts),
         "errors": errors,
+        "source_http": source_http,
+        "blocked_sources": blocked_sources,
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,
