@@ -112,6 +112,23 @@ Secrets: `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY
 A de-listed object is deleted only after 48h, because clients and CDN nodes still
 hold the previous manifest.
 
+**Verifying a publish.** A green workflow proves the scrape yielded events and the
+uploads returned 200 — not that the redaction fired or that the published shape is
+the one this version writes; the freshness gate only counts events. Those are
+properties of the artefact, so check the artefact:
+
+```
+python -m pipeline audit-feed --city berlin          # 500-object sample
+python -m pipeline audit-feed --city berlin --all    # every object
+```
+
+It reads the manifest, the feed rows and the detail objects straight out of the
+bucket and reports the published `schema_version`, the object counts, any pre-v2
+uncompressed objects still lying around, and every email address or phone number
+still reachable in a published object. That last check runs the same
+`contains_contact` the export gate uses, so a disagreement between them is a bug,
+not a judgement call.
+
 **Retiring the v1 generation (once).** The cutover renames every detail object, so
 the first v2 publish adds its objects beside the v1 ones rather than replacing
 them, and the bucket briefly doubles. `publish`'s own pruning then refuses

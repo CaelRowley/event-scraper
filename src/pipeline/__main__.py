@@ -32,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
                            help="upload only; don't delete de-listed objects "
                                 "(use for limited/partial scrapes)")
 
+    p_audit = sub.add_parser("audit-feed",
+                             help="check the published feed for contact details and shape")
+    p_audit.add_argument("--city", default="berlin")
+    p_audit.add_argument("--all", action="store_true",
+                         help="open every detail object (default: a 500-object sample)")
+
     p_purge = sub.add_parser("purge-legacy",
                              help="one-off: delete the pre-v2 uncompressed event objects")
     p_purge.add_argument("--city", default="berlin")
@@ -68,6 +74,13 @@ def main(argv: list[str] | None = None) -> int:
         from .publish_r2 import publish
 
         print(json.dumps(publish(args.city, prune=not args.no_prune)))
+        return 0
+
+    if args.cmd == "audit-feed":
+        from .audit_feed import DEFAULT_SAMPLE, audit
+
+        print(json.dumps(audit(args.city, sample=None if args.all else DEFAULT_SAMPLE),
+                         indent=2))
         return 0
 
     if args.cmd == "purge-legacy":
