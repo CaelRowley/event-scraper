@@ -110,7 +110,24 @@ description, occurrence set or alias moves a detail object now.
 
 Secrets: `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
 A de-listed object is deleted only after 48h, because clients and CDN nodes still
-hold the previous manifest. The workflow's only commit is a
+hold the previous manifest.
+
+**Retiring the v1 generation (once).** The cutover renames every detail object, so
+the first v2 publish adds its objects beside the v1 ones rather than replacing
+them, and the bucket briefly doubles. `publish`'s own pruning then refuses
+forever: it compares the export against the bucket, sees it holding under half,
+and reads that as a broken scrape. The guard is right to fire, so the old
+generation is retired by hand instead — after the first v2 publish, run
+
+```
+python -m pipeline purge-legacy --city berlin           # list what would go
+python -m pipeline purge-legacy --city berlin --apply   # delete it
+```
+
+It only ever deletes `<city>/events/*.json`, refuses unless a `.json.gz`
+generation is already present, and leaves the manifest, feed and geo alone. It
+matters beyond housekeeping: those objects hold source prose from before
+`redact.py` existed, in a world-readable bucket. The workflow's only commit is a
 keep-alive that fires just when the branch nears 60 days idle (GitHub disables
 scheduled workflows on inactive repos); ordinary development makes it a no-op.
 
