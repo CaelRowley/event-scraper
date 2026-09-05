@@ -34,28 +34,15 @@ jobs:
 
       # data/ (SQLite DB + HTTP cache) persists between runs via the cache, NOT git —
       # the delta ledgers, image-scan ledger, detail caches, and pending LLM batch id
-      # all live there.
+      # all live there. A cache miss costs one slow cold run and nothing else:
+      # event ids are derived from the source listing (ids.py), so a rebuilt
+      # database reproduces them exactly.
       - name: Restore data
         uses: actions/cache/restore@v4
         with:
           path: data
           key: pipeline-data-${{ github.run_id }}
           restore-keys: pipeline-data-
-
-      # A cache miss is not just a slow cold run: event ids are ULIDs minted at
-      # insert time, so rebuilding from nothing re-keys every event, breaks every
-      # saved id in the app, and re-uploads the whole bucket. The snapshot is the
-      # floor under that. It is only read when the cache came back empty — a hit
-      # is always newer. Backup bucket, never the public feed bucket.
-      - name: Restore DB snapshot if the cache missed
-        continue-on-error: true
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_BACKUP_BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: python -m pipeline db-restore
 
       - name: Run pipeline
         env:
@@ -130,21 +117,6 @@ jobs:
             ARGS="$ARGS --no-prune"
           fi
           python -m pipeline publish $ARGS
-
-      # After the publish, deliberately. Getting the feed out is the job; the
-      # snapshot is a safety net for a future cold start, and a misconfigured
-      # backup bucket must never be what stops today's feed from shipping.
-      # Same gate as the cache save above: only a run that passed the freshness
-      # check gets to become the state a future cold run starts from.
-      - name: Snapshot DB to R2
-        continue-on-error: true
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_BACKUP_BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: python -m pipeline db-snapshot
 
       # A failed run is invisible to users — they keep seeing yesterday's feed,
       # because the last manifest still resolves. Say so loudly here; the client

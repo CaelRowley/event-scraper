@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .ids import event_id
+from .ids import event_id, occurrence_id
 from .models import Event, Occurrence, Price
 
 SCHEMA = """
@@ -174,7 +174,7 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
     ).fetchone()
     new_hash = ev.content_hash()
     if row is None:
-        ev.id = ev.id or event_id()
+        ev.id = ev.id or event_id(ev.source, ev.source_event_id)
         ev.canonical_id = ev.canonical_id or ev.id
         conn.execute(
             """INSERT INTO events(id,canonical_id,city,source_slug,source_event_id,source_url,title,
@@ -218,7 +218,7 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
                      ends_at_utc=excluded.ends_at_utc, starts_at_local=excluded.starts_at_local,
                      doors_at_local=excluded.doors_at_local, nightlife_date=excluded.nightlife_date,
                      time_unknown=excluded.time_unknown, status=excluded.status""",
-                (event_id(), ev.id, occ.starts_at_utc, occ.ends_at_utc, occ.starts_at_local,
+                (occurrence_id(ev.id, occ.starts_at_utc), ev.id, occ.starts_at_utc, occ.ends_at_utc, occ.starts_at_local,
                  occ.doors_at_local, occ.nightlife_date, int(occ.time_unknown), occ.status),
             )
     return ev.id, changed

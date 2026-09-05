@@ -97,11 +97,7 @@ def test_private_fields_never_publish():
 
 
 def test_unchanged_data_produces_identical_hashes():
-    """Unstable hashes would make every client re-download daily for nothing.
-
-    Same database exported twice — ids are ULIDs minted at insert time, so this
-    has to reuse one connection rather than reseed.
-    """
+    """Unstable hashes would make every client re-download daily for nothing."""
     conn = _seed()
     a, b = _build(conn), _build(conn)
     assert a["manifest"]["feed"]["hash"] == b["manifest"]["feed"]["hash"]

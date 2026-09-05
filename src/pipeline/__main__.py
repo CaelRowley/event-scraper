@@ -38,11 +38,6 @@ def main(argv: list[str] | None = None) -> int:
     p_purge.add_argument("--apply", action="store_true",
                          help="actually delete (default: list what would go)")
 
-    p_snap = sub.add_parser("db-snapshot", help="upload the pipeline DB to the backup bucket")
-    p_restore = sub.add_parser("db-restore", help="restore the pipeline DB when the CI cache missed")
-    p_restore.add_argument("--force", action="store_true",
-                           help="overwrite a local DB (default: keep it, it is newer)")
-
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -79,18 +74,6 @@ def main(argv: list[str] | None = None) -> int:
         from .purge_r2 import purge_legacy
 
         print(json.dumps(purge_legacy(args.city, apply=args.apply)))
-        return 0
-
-    if args.cmd == "db-snapshot":
-        from .backup import snapshot
-
-        print(json.dumps(snapshot()))
-        return 0
-
-    if args.cmd == "db-restore":
-        from .backup import restore
-
-        print(json.dumps(restore(force=args.force)))
         return 0
 
     if args.cmd == "venues-bootstrap":

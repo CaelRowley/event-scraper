@@ -133,25 +133,18 @@ scheduled workflows on inactive repos); ordinary development makes it a no-op.
 
 **The pipeline DB.** `data/` (SQLite DB + HTTP cache — the delta ledgers, detail
 caches, image-scan ledger, pending LLM batch id) persists between runs via
-`actions/cache`, never via git. That cache is the only home of the ULIDs every
-published event is keyed by, so losing it is not just a slow cold run: every event
-is re-inserted under a new id, every saved id in the app breaks, and the whole
-bucket churns at once. So each successful run also writes one rolling snapshot
-(`python -m pipeline db-snapshot`), and a run that finds no cached DB restores it
-(`db-restore`) before scraping. A cache hit always wins — it is newer than any
-snapshot. Secret: `R2_BACKUP_BUCKET`, which **must not** be `R2_BUCKET`; the DB
-holds unredacted source prose and internal scoring, and the feed bucket is
-world-readable. Pointing both at one bucket raises `BucketConfusion` rather than
-uploading — that one refusal is loud, because it is a mistake no retry fixes.
+`actions/cache`, never via git. A cache miss costs one slow cold run and nothing
+more, because the one thing that would have been expensive to lose is no longer
+stored at all: **event ids are derived, not minted**. `ids.py` hashes
+`(source_slug, source_event_id)`, so the same listing yields the same id on any
+machine from any starting state, and a rebuilt database reproduces the catalogue
+exactly rather than re-keying it. That is what makes the database a cache you can
+throw away — no snapshot, no second bucket, nothing to keep in step.
 
-Every *other* backup failure is deliberately quiet. The restore runs before the
-scrape and the snapshot runs after the publish, so a bucket that is missing,
-misnamed, or outside the API token's scope would otherwise stop the feed from
-shipping over a safety net nobody needed that day. Both steps degrade to a logged
-skip, and both carry `continue-on-error`. Note the token: it needs write access
-to *both* buckets, and an R2 token scoped to the feed bucket alone will silently
-skip every snapshot — check for `db-snapshot` reporting `bytes` in the run log
-the first time.
+Everything else in there self-heals: the HTTP cache refills, delta ledgers cost a
+slower run, dedup clusters recompute, a lost Haiku batch is about $0.28. The
+slowest to rebuild is the image-scan ledger (~150 pages/run), which affects
+coverage, not correctness.
 
 Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for
 the Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
