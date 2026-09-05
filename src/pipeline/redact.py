@@ -2,7 +2,7 @@
 
 Open-licensed descriptions (kulturdaten is the only source we carry prose from)
 routinely end with a booking line — "Info und Anmeldung: Frau Muster Tel. 55 50 12
-24", a named organiser's work address, a private mobile. The licence lets us
+34", a named organiser's work address, a private mobile. The licence lets us
 republish the text; it does not make us the right party to re-publish someone's
 phone number at a new address, and roughly one description in ten carries one.
 Everything here is applied at the single point where a database row becomes a

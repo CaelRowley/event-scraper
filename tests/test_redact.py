@@ -1,4 +1,5 @@
 """Contact-stripping: what must go, what must survive, and the export wiring."""
+import gzip
 import json
 from datetime import date
 from pathlib import Path
@@ -26,7 +27,7 @@ def test_removes_a_plain_address():
 
 
 def test_removes_an_address_with_punctuation_in_the_local_part():
-    assert "@" not in clean(LEAD + "Kontakt redacted@example.invalid heute")
+    assert "@" not in clean(LEAD + "Kontakt bildung_ns-abteilung@example-museum.de heute")
 
 
 def test_removes_an_at_obfuscated_address():
@@ -42,29 +43,29 @@ def test_leaves_a_bare_handle_alone():
 # --- numbers ---------------------------------------------------------------------
 
 def test_removes_an_international_number():
-    assert "8410" not in clean(LEAD + "Karten über +49 (0)30 5550 1234 erhältlich.")
+    assert "5550" not in clean(LEAD + "Karten über +49 (0)30 5550 1234 erhältlich.")
 
 
 def test_removes_a_national_number_with_a_trunk_zero():
-    assert "90239" not in clean(LEAD + "Auskunft erteilt 030 55501 234 gern.")
+    assert "55501" not in clean(LEAD + "Auskunft erteilt 030 55501 234 gern.")
 
 
 def test_removes_a_bracketed_area_code_together_with_its_bracket():
     cleaned = clean(LEAD + "Bei Fragen (030) 55501 234 anrufen.")
-    assert "90239" not in cleaned and "(" not in cleaned
+    assert "55501" not in cleaned and "(" not in cleaned
 
 
 def test_removes_a_mobile_number():
-    assert "5550000" not in clean(LEAD + "Mobil +49 (0) 162 5550000 erreichbar.")
+    assert "5550000" not in clean(LEAD + "Mobil +49 (0) 160 5550000 erreichbar.")
 
 
 def test_removes_a_local_number_that_only_a_label_identifies():
     # No trunk zero — "Tel." is the only thing marking these digits as a number.
-    assert "56 58" not in clean(LEAD + "Info: Frau Muster Tel. 55 50 12 24 anrufen.")
+    assert "55 50" not in clean(LEAD + "Info: Frau Muster Tel. 55 50 12 34 anrufen.")
 
 
 def test_removes_a_number_written_with_slashes():
-    assert "4595" not in clean(LEAD + "Erreichbar unter 030 / 5550 1234 täglich.")
+    assert "5550" not in clean(LEAD + "Erreichbar unter 030 / 5550 1234 täglich.")
 
 
 # --- what must survive -----------------------------------------------------------
@@ -179,9 +180,16 @@ def _seed(description, title="Lesung im Garten"):
 
 
 def _published(tmp_path: Path) -> str:
-    """Every JSON object the export wrote, concatenated — nothing may carry a contact."""
-    return "".join(p.read_text(encoding="utf-8")
-                   for p in (tmp_path / "berlin").rglob("*.json"))
+    """Every object the export wrote, concatenated — nothing may carry a contact.
+
+    The gzipped ones matter most: the feed, geo and detail objects all ship
+    compressed, so a plain `*.json` sweep would silently check almost nothing.
+    """
+    out = []
+    for path in sorted((tmp_path / "berlin").rglob("*.json*")):
+        raw = path.read_bytes()
+        out.append((gzip.decompress(raw) if path.suffix == ".gz" else raw).decode("utf-8"))
+    return "".join(out)
 
 
 def test_export_strips_contacts_from_every_published_shape(tmp_path: Path):
@@ -191,7 +199,7 @@ def test_export_strips_contacts_from_every_published_shape(tmp_path: Path):
     assert stats["redacted"] == 1
     published = _published(tmp_path)
     assert "rudow@example.de" not in published
-    assert "90239" not in published
+    assert "55501" not in published
     assert "Eine Lesung im Garten." in published
 
 
@@ -206,5 +214,5 @@ def test_a_contact_in_the_title_is_stripped_too(tmp_path: Path):
 
     assert stats["redacted"] == 1
     index = json.loads((tmp_path / "berlin" / "index.json").read_text(encoding="utf-8"))
-    assert "8410" not in index["events"][0]["title"]
+    assert "5550" not in index["events"][0]["title"]
     assert "Festivalpass" in index["events"][0]["title"]
