@@ -89,20 +89,45 @@ the events that actually changed (~500/day of ~6,400). The manifest is written
 last, so a reader never sees it pointing at an object that is not there yet.
 
 ```
-berlin/manifest.json              window, per-day + per-category counts, current hashes
-berlin/feed.<hash>.json.gz        every listable row, no descriptions  (~0.8 MB gz)
-berlin/events/<id>.<hash>.json    one event in full: description, occurrences, aliases
-berlin/geo.<hash>.json.gz         the ~11% of rows carrying coordinates
+berlin/manifest.json                 window, per-day + per-category counts, current hashes
+berlin/feed.<hash>.json.gz           every listable row, no descriptions
+berlin/events/<id>.<hash>.json.gz    what a row lacks: description, occurrences, aliases
+berlin/geo.<hash>.json.gz            the ~11% of rows carrying coordinates
 ```
+
+`h` on a feed row is the only published route to a detail object, and two things
+follow from that. A reader holding the hash necessarily holds the row, so the
+object repeats none of `LIST_FIELDS` — it carries only what the row lacks. And an
+event that never reaches a listing has no published hash, so no object is written
+for it at all. With gzip on top (R2 serves bytes verbatim and will not compress
+for you) that took Berlin's bucket from 31 MB to 12.6 MB, and the average detail
+object from 1,507 B to 518 B. `SCHEMA_VERSION` is 2; a v1 client reading a v2
+object finds no title or venue, so bump both sides together.
+
+It also cut the churn. Title, venue, price and image live on the list row, so
+editing one re-publishes the feed object and nothing else — only a changed
+description, occurrence set or alias moves a detail object now.
 
 Secrets: `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
 A de-listed object is deleted only after 48h, because clients and CDN nodes still
 hold the previous manifest. The workflow's only commit is a
 keep-alive that fires just when the branch nears 60 days idle (GitHub disables
-scheduled workflows on inactive repos); ordinary development makes it a no-op. `data/` (SQLite DB + HTTP cache — the
-delta ledgers, detail caches, image-scan ledger, pending LLM batch id) persists
-between runs via `actions/cache`, never via git; a cache miss just means one slower
-cold run. Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for
+scheduled workflows on inactive repos); ordinary development makes it a no-op.
+
+**The pipeline DB.** `data/` (SQLite DB + HTTP cache — the delta ledgers, detail
+caches, image-scan ledger, pending LLM batch id) persists between runs via
+`actions/cache`, never via git. That cache is the only home of the ULIDs every
+published event is keyed by, so losing it is not just a slow cold run: every event
+is re-inserted under a new id, every saved id in the app breaks, and the whole
+bucket churns at once. So each successful run also writes one rolling snapshot
+(`python -m pipeline db-snapshot`), and a run that finds no cached DB restores it
+(`db-restore`) before scraping. A cache hit always wins — it is newer than any
+snapshot. Secret: `R2_BACKUP_BUCKET`, which **must not** be `R2_BUCKET`; the DB
+holds unredacted source prose and internal scoring, and the feed bucket is
+world-readable. Pointing both at one bucket raises `BucketConfusion` rather than
+uploading.
+
+Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for
 the Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
 
 Sources fetch concurrently (one thread per adapter, own SQLite connection each);
@@ -147,12 +172,35 @@ The demo labels them "stock"; provider configurable in `export.py`
 
 ## Data & legal posture
 
-Facts only (title/date/venue/price), never editorial prose; every exported item links
-back to its original listing; honest identifying User-Agent with contact email
-(browser UA only where a source blocks non-browser clients — RA, Eventbrite);
-robots.txt enforced via Protego; per-source kill switch in `config.py`;
-images are hotlinked with a placeholder fallback (no re-hosting);
-Ticketmaster fields are refreshed each run, not archived.
+Facts only (title/date/venue/price) except where a source's licence covers its prose
+— descriptions are carried for open-licensed sources only (CC-BY kulturdaten), and
+`description_public` gates that per event; every exported item links back to its
+original listing; honest identifying User-Agent with contact email (browser UA only
+where a source blocks non-browser clients — RA, Eventbrite); robots.txt enforced via
+Protego; per-source kill switch in `config.py`; images are hotlinked with a
+placeholder fallback (no re-hosting); Ticketmaster fields are refreshed each run,
+not archived.
+
+### Contact stripping
+
+Roughly one kulturdaten description in ten ends with a booking line carrying a real
+person's phone number or address — council staff, a named organiser, a private
+mobile. A CC-BY licence covers republishing the text; it is not a basis for
+re-publishing someone's contact details at a new address, and the data is German, so
+GDPR applies. `redact.py` strips addresses and phone numbers from `title` and
+`description` in `export.py:_row_to_item` — the one point where a stored row becomes
+a published item, so the demo export and the feed cannot drift apart on it. Runs
+report the count as `export.redacted` in telemetry.
+
+Numbers are the hard half: German prose is full of digit runs that must survive
+(`20.03.2024`, `8.30 - 9.30 Uhr`, `12,50 €`, postal codes). A candidate has to match
+a shape *and* clear a digit-count floor, and a dotted run is only read as a number
+when a `Tel.`/`Mobil` label vouches for it. Validated against 43,472 real strings
+from the exported feed: 3,703 contacts removed, no date, time or price altered.
+
+It removes contact *routes*, not identities — "Info und Anmeldung: Frau Muster" keeps
+the name. Stripping names would need NER and would eat the performer and artist names
+that are the point of the feed.
 
 ## Multi-city
 

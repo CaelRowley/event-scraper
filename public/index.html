@@ -103,6 +103,9 @@ const fmtPrice = p => {
 
 async function load() {
   const res = await fetch("berlin/index.json");
+  // The exported feed is generated, never committed — see .gitignore. A 404 here
+  // means nobody has run the pipeline into this directory yet.
+  if (!res.ok) throw new Error(`no local export (HTTP ${res.status})`);
   DATA = await res.json();
   document.getElementById("meta").textContent =
     `${DATA.meta.total} events · ${DATA.meta.window.from} → ${DATA.meta.window.to} · generated ${DATA.meta.generated_at}`;
@@ -184,7 +187,13 @@ function card(item) {
 }
 
 load().catch(err => {
-  document.getElementById("meta").textContent = "failed to load berlin/index.json — " + err;
+  document.getElementById("meta").textContent = `${err} — this demo runs on a local export.`;
+  document.getElementById("grid").innerHTML =
+    '<p>Generate it first:</p>' +
+    '<pre>python -m pipeline run --city berlin --limit 20 --no-llm\n' +
+    'python -m http.server -d public 8000</pre>' +
+    '<p>The published feed the app reads is a different shape ' +
+    '(<code>manifest.json</code> + <code>feed.&lt;hash&gt;.json.gz</code>) and lives in R2.</p>';
 });
 </script>
 </body>
