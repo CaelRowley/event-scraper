@@ -85,9 +85,10 @@ def test_changing_one_event_uploads_only_that_object_and_the_feed(r2, tmp_path):
     export_city(conn, "berlin", tmp_path)
     stats = publish_r2.publish("berlin", tmp_path)
 
-    # one new event object + one new feed object (manifest is overwritten in place)
-    assert stats["uploaded"] == 2, f"expected 2 new objects, got {stats['uploaded']}"
-    assert stats["unchanged"] >= 1, "the untouched event must not re-upload"
+    # Title is a list field, so only the feed object is new — the detail objects
+    # hold description/occurrences/aliases and none of those moved.
+    assert stats["uploaded"] == 1, f"expected 1 new object, got {stats['uploaded']}"
+    assert stats["unchanged"] >= 2, "both event objects must not re-upload"
     # the superseded objects are still served — clients hold the old manifest
     assert before <= _keys(r2)
 
@@ -114,6 +115,18 @@ def test_gzipped_objects_carry_content_encoding(r2, tmp_path):
     manifest = r2.head_object(Bucket=BUCKET, Key="berlin/manifest.json")
     assert "immutable" not in manifest["CacheControl"]
     assert "s-maxage=300" in manifest["CacheControl"]
+
+
+def test_detail_objects_are_published_gzipped(r2, tmp_path):
+    """R2 serves bytes verbatim, so an object published raw is read raw forever."""
+    _seed_and_export(tmp_path, ["A"])
+    publish_r2.publish("berlin", tmp_path)
+    key = next(k for k in _keys(r2) if k.startswith("berlin/events/"))
+    assert key.endswith(".json.gz")
+    head = r2.head_object(Bucket=BUCKET, Key=key)
+    assert head["ContentEncoding"] == "gzip"
+    assert head["ContentType"] == "application/json"
+    assert "immutable" in head["CacheControl"]
 
 
 def test_delisted_objects_survive_the_grace_window(r2, tmp_path):
@@ -180,7 +193,7 @@ def _keys_named_by_manifest(s3):
     feed_key = f"berlin/{manifest['feed']['url']}"
     import gzip
     rows = json.loads(gzip.decompress(s3.get_object(Bucket=BUCKET, Key=feed_key)["Body"].read()))
-    named |= {f"berlin/events/{r['event_id']}.{r['h']}.json" for r in rows}
+    named |= {f"berlin/events/{r['event_id']}.{r['h']}.json.gz" for r in rows}
     return named
 
 

@@ -6,7 +6,7 @@ Two shapes come out of here, and the distinction matters:
   human-readable, for the public demo page.
 
 * **The published feed** (`manifest.json`, `feed.<hash>.json.gz`,
-  `events/<id>.<hash>.json`, `geo.<hash>.json`) is what the Gobento app syncs.
+  `geo.<hash>.json.gz`, `events/<id>.<hash>.json.gz`) is what the Gobento app syncs.
   It exists because serving a browsable feed out of a SQL database meant every
   visitor scanning the whole table several times over — the feed is the same
   document for everybody, so it is published once here and read straight from
@@ -22,6 +22,20 @@ The list objects carry `LIST_FIELDS` only. `description` is ~43% of the payload
 and is wanted on one screen, so it lives in the per-event objects; the list rows
 carry `h`, the hash of their event object, which is how a client builds that URL
 without another round-trip.
+
+That `h` is the only published route to a detail object, and it appears nowhere
+but on a feed row. Two things follow, and the shape here depends on both:
+
+* A reader that can address a detail object necessarily holds its list row, so
+  the object carries only what the row lacks — `description`, the occurrence
+  list, and the alias trail. Repeating title, venue, price and the rest would be
+  about half the payload spent on bytes the reader already has.
+* An object for an event that never reaches a listing is unreachable by
+  construction, so none is written. That was ~6.5% of the bucket.
+
+Detail objects ship gzipped (`events/<id>.<hash>.json.gz`), like the feed and geo
+lists. R2 serves bytes verbatim and will not compress on the way out, so anything
+published uncompressed stays uncompressed on every read.
 """
 
 from __future__ import annotations
@@ -37,6 +51,7 @@ from . import config as cfg
 from .categorise.taxonomy import LABELS
 from .db import now_iso
 from .placeholders import placeholder_url
+from .redact import contains_contact, redact_contacts
 
 PLACEHOLDER_PROVIDER = "loremflickr"  # loremflickr | picsum | none
 
@@ -44,7 +59,10 @@ PLACEHOLDER_PROVIDER = "loremflickr"  # loremflickr | picsum | none
 # against its own compiled constant and resets its cache on a mismatch, so an
 # old tab can't misread a new feed. Keep in step with SCHEMA_VERSION in
 # Gobento's frontend/src/services/discoverStore.ts.
-SCHEMA_VERSION = 1
+#
+# 2: detail objects are gzipped, named `.json.gz`, and carry only the fields a
+#    list row lacks. A v1 client reading a v2 object finds no title/venue/price.
+SCHEMA_VERSION = 2
 
 # Fields a browsing client needs for a card. Everything else — description above
 # all — is in the per-event object, fetched only when a detail view opens.
@@ -62,6 +80,13 @@ LIST_FIELDS = (
 
 # Internal scoring/bookkeeping that must never reach a published object.
 PRIVATE_FIELDS = frozenset({"category_tier", "category_confidence", "source_category_raw"})
+
+# Fields that belong to one occurrence rather than to the event. They move into
+# the detail object's `occurrences` list instead of sitting at its top level.
+OCCURRENCE_FIELDS = frozenset({
+    "id", "starts_at_utc", "ends_at_utc", "starts_at_local", "doors_at_local",
+    "nightlife_date", "time_unknown", "event_status",
+})
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +129,12 @@ def _series_key(row) -> str:
 
 def _row_to_item(row) -> dict:
     keys = row.keys()
+    # The one gate between a stored row and anything published. Source prose carries
+    # organisers' phone numbers and addresses; the licence covers the text, not
+    # re-publishing someone's contact details at a new address. Applied here so the
+    # demo export and the published feed cannot drift apart on it — see redact.py.
+    title, _ = redact_contacts(row["title"])
+    description, _ = redact_contacts(row["description"])
     return {
         # Occurrence-unique. One event with several start times is several cards,
         # and this is the id a client addresses a single one of them by.
@@ -116,7 +147,7 @@ def _row_to_item(row) -> dict:
         # When this event first entered the feed — lets a client mark "new".
         # Absent on databases predating the column, hence the guard.
         "first_seen_at": row["first_seen_at"] if "first_seen_at" in keys else None,
-        "title": row["title"],
+        "title": title,
         "category": row["category"],
         "category_label": LABELS.get(row["category"], "Other"),
         "category_tier": row["category_tier"],
@@ -146,7 +177,7 @@ def _row_to_item(row) -> dict:
         # across events; UIs should treat it as decoration and may label it "stock"
         "placeholder_url": None if (row["image_url"] or _stock_url(row, keys)) else placeholder_url(
             row["id"], row["category"], PLACEHOLDER_PROVIDER),
-        "description": row["description"],  # open-licensed sources only (CC-BY)
+        "description": description,  # open-licensed sources only (CC-BY), contacts stripped
         "source": row["source_slug"],
         "source_url": row["source_url"],
         # true when the link is a raw data record, not a human page — UIs should label it
@@ -169,6 +200,28 @@ def _list_row(item: dict, event_hash: str) -> dict:
     return row
 
 
+def _detail_payload(event_id: str, occurrences: list[dict], aliases: list[str]) -> dict:
+    """What a reader can't already have: the heavy fields, the dates, the alias trail.
+
+    `event_id` is the one list field kept — it is how a fetched object ties back
+    to the row that named it, and to a bookmark holding a superseded id.
+    """
+    first = occurrences[0]
+    body = {
+        k: v for k, v in first.items()
+        if k not in LIST_FIELDS and k not in PRIVATE_FIELDS and k not in OCCURRENCE_FIELDS
+    }
+    return {
+        "event_id": event_id,
+        **body,
+        "occurrences": [
+            {k: o[k] for k in sorted(OCCURRENCE_FIELDS)}
+            for o in sorted(occurrences, key=lambda o: o["starts_at_utc"])
+        ],
+        "aliases": sorted(aliases),
+    }
+
+
 def build_feed(conn, city: str, items: list[dict], meta: dict) -> dict:
     """Assemble the published objects. Pure — writing/uploading is the caller's job.
 
@@ -189,42 +242,23 @@ def build_feed(conn, city: str, items: list[dict], meta: dict) -> dict:
         aliases.setdefault(r["canonical_id"], []).append(r["alias_id"])
         alias_map[r["alias_id"]] = r["canonical_id"]
 
-    # One object per event, carrying every occurrence of it plus the heavy fields.
+    # Listing first: an event that never reaches a feed row has no published hash,
+    # so nothing could address its detail object. Building one would be dead weight.
+    listed = [i for i in items if _is_presentable(i)]
+    listed.sort(key=lambda i: (i["starts_at_utc"] or "", i["id"]))
+
     by_event: dict[str, list[dict]] = {}
-    for item in items:
+    for item in listed:
         by_event.setdefault(item["event_id"], []).append(item)
 
     events: dict[str, dict] = {}
     event_hashes: dict[str, str] = {}
     for event_id, occurrences in by_event.items():
-        first = occurrences[0]
-        # Everything that is a property of the event, minus the per-occurrence
-        # fields (they move into `occurrences`) and anything internal.
-        per_occurrence = {"id", "starts_at_utc", "ends_at_utc", "starts_at_local",
-                          "doors_at_local", "nightlife_date", "time_unknown", "event_status"}
-        payload = {
-            **{k: v for k, v in first.items() if k not in per_occurrence and k not in PRIVATE_FIELDS},
-            "occurrences": [
-                {
-                    "id": o["id"],
-                    "starts_at_utc": o["starts_at_utc"],
-                    "starts_at_local": o["starts_at_local"],
-                    "ends_at_utc": o["ends_at_utc"],
-                    "doors_at_local": o["doors_at_local"],
-                    "nightlife_date": o["nightlife_date"],
-                    "time_unknown": o["time_unknown"],
-                    "event_status": o["event_status"],
-                }
-                for o in sorted(occurrences, key=lambda o: o["starts_at_utc"])
-            ],
-            "aliases": sorted(aliases.get(event_id, [])),
-        }
+        payload = _detail_payload(event_id, occurrences, aliases.get(event_id, []))
         h = _hash(payload)
         event_hashes[event_id] = h
-        events[f"events/{event_id}.{h}.json"] = payload
+        events[f"events/{event_id}.{h}.json.gz"] = payload
 
-    listed = [i for i in items if _is_presentable(i)]
-    listed.sort(key=lambda i: (i["starts_at_utc"] or "", i["id"]))
     feed_rows = [_list_row(i, event_hashes[i["event_id"]]) for i in listed]
     geo_rows = [r for r in feed_rows if r.get("geo")]
 
@@ -289,7 +323,7 @@ def _remove_superseded(city_dir: Path, built: dict) -> None:
     """
     keep = {built["feed"][0], built["geo"][0], *built["events"]}
     candidates = [*city_dir.glob("feed.*.json.gz"), *city_dir.glob("geo.*.json.gz"),
-                  *(city_dir / "events").glob("*.json")]
+                  *(city_dir / "events").glob("*.json.gz")]
     for path in candidates:
         if path.relative_to(city_dir).as_posix() not in keep:
             path.unlink()
@@ -310,6 +344,13 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
            ORDER BY o.starts_at_utc""",
         (city, date_from, date_to),
     ).fetchall()
+
+    # Counted off the raw rows rather than tracked through _row_to_item, so the
+    # number means "rows that arrived carrying contact details" — a source that
+    # starts or stops publishing them is visible in run telemetry either way.
+    redacted = sum(
+        1 for r in rows if contains_contact(r["description"]) or contains_contact(r["title"])
+    )
 
     items = [_row_to_item(r) for r in rows]
     by_day: dict[str, list[dict]] = {}
@@ -344,14 +385,16 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
     _write_json(city_dir / built["feed"][0], built["feed"][1], gzipped=True)
     _write_json(city_dir / built["geo"][0], built["geo"][1], gzipped=True)
     for name, payload in built["events"].items():
-        _write_json(city_dir / name, payload, gzipped=False)
+        _write_json(city_dir / name, payload, gzipped=name.endswith(".gz"))
     # Last, so a reader never sees a manifest naming an object that isn't there yet.
     _write_json(city_dir / "manifest.json", built["manifest"], gzipped=False)
 
     log.info(
-        "exported %d occurrences (%d days) to %s — feed=%d listed, %d events, %d geo",
+        "exported %d occurrences (%d days) to %s — feed=%d listed, %d events, %d geo, "
+        "%d rows had contact details stripped",
         len(items), len(by_day), city_dir,
         built["manifest"]["feed"]["count"], len(built["events"]), built["manifest"]["geo"]["count"],
+        redacted,
     )
     return {
         "events": len(items),
@@ -359,4 +402,5 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
         "listed": built["manifest"]["feed"]["count"],
         "event_objects": len(built["events"]),
         "feed_hash": built["manifest"]["feed"]["hash"],
+        "redacted": redacted,
     }

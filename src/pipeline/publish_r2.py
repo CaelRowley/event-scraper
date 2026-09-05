@@ -69,8 +69,11 @@ IMMUTABLE = "public, max-age=31536000, immutable"
 MANIFEST_CACHE = "public, max-age=0, s-maxage=300, stale-while-revalidate=3600"
 
 
-def _client():
-    """boto3 S3 client pointed at R2, or None when credentials are absent."""
+def client():
+    """boto3 S3 client pointed at R2, or None when credentials are absent.
+
+    Shared with backup.py, which writes to a *different* bucket — see there.
+    """
     account = os.getenv("R2_ACCOUNT_ID")
     key = os.getenv("R2_ACCESS_KEY_ID")
     secret = os.getenv("R2_SECRET_ACCESS_KEY")
@@ -153,7 +156,7 @@ def _local_objects(city_dir: Path, city: str) -> dict[str, Path]:
         keys[f"{city}/{path.name}"] = path
     events_dir = city_dir / "events"
     if events_dir.is_dir():
-        for path in events_dir.glob("*.json"):
+        for path in events_dir.glob("*.json.gz"):
             keys[f"{city}/events/{path.name}"] = path
     return keys
 
@@ -180,7 +183,7 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     if not manifest_path.exists():
         raise FileNotFoundError(f"no manifest at {manifest_path} — run `export` first")
 
-    s3 = _client()
+    s3 = client()
     if s3 is None:
         log.warning("R2 credentials not set — skipping publish")
         return {"skipped": True, "reason": "no-credentials"}
