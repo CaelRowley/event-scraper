@@ -48,6 +48,7 @@ jobs:
       # floor under that. It is only read when the cache came back empty — a hit
       # is always newer. Backup bucket, never the public feed bucket.
       - name: Restore DB snapshot if the cache missed
+        continue-on-error: true
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -106,17 +107,6 @@ jobs:
           path: data
           key: pipeline-data-${{ github.run_id }}
 
-      # Same gate as the cache save above: only a run that passed the freshness
-      # check gets to become the state a future cold run starts from.
-      - name: Snapshot DB to R2
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_BACKUP_BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: python -m pipeline db-snapshot
-
       # Publish the exported feed to Cloudflare R2 — the objects Gobento reads.
       # Runs only after the freshness gate above passes, so a zero/failed scrape
       # never reaches the bucket (and publish itself refuses to prune when the
@@ -140,6 +130,21 @@ jobs:
             ARGS="$ARGS --no-prune"
           fi
           python -m pipeline publish $ARGS
+
+      # After the publish, deliberately. Getting the feed out is the job; the
+      # snapshot is a safety net for a future cold start, and a misconfigured
+      # backup bucket must never be what stops today's feed from shipping.
+      # Same gate as the cache save above: only a run that passed the freshness
+      # check gets to become the state a future cold run starts from.
+      - name: Snapshot DB to R2
+        continue-on-error: true
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_BACKUP_BUCKET: ${{ secrets.R2_BACKUP_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python -m pipeline db-snapshot
 
       # A failed run is invisible to users — they keep seeing yesterday's feed,
       # because the last manifest still resolves. Say so loudly here; the client

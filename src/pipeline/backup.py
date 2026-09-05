@@ -37,6 +37,9 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from boto3.exceptions import Boto3Error
+from botocore.exceptions import BotoCoreError, ClientError
+
 from . import config as cfg
 from .publish_r2 import client
 
@@ -66,6 +69,14 @@ def _skip(reason: str) -> dict:
     return {"skipped": True, "reason": reason}
 
 
+# Anything boto raises for a bucket that is absent, misnamed, or outside the
+# token's scope. A backup is best-effort: the scrape and the feed publish are the
+# job, and neither may fail because the safety net is misconfigured.
+# S3UploadFailedError is a Boto3Error, not a botocore one — upload_file wraps
+# the underlying ClientError, so catching only botocore misses every upload.
+_S3_TROUBLE = (ClientError, BotoCoreError, Boto3Error, OSError)
+
+
 def snapshot(db_path: str | Path | None = None) -> dict:
     """Upload a consistent, compacted copy of the DB. Overwrites the previous one."""
     path = Path(db_path or cfg.DB_PATH)
@@ -79,6 +90,13 @@ def snapshot(db_path: str | Path | None = None) -> dict:
     if s3 is None:
         return _skip("no credentials")
 
+    try:
+        return _upload(s3, bucket, path)
+    except _S3_TROUBLE as exc:
+        return _skip(f"upload failed ({type(exc).__name__}) — the run continues")
+
+
+def _upload(s3, bucket: str, path: Path) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         # VACUUM INTO takes a consistent copy without stopping writers and drops
         # free pages on the way out — a plain file copy of a live WAL database
@@ -128,6 +146,10 @@ def restore(db_path: str | Path | None = None, *, force: bool = False) -> dict:
         body = s3.get_object(Bucket=bucket, Key=KEY)["Body"].read()
     except s3.exceptions.NoSuchKey:
         return _skip("no snapshot in the bucket yet")
+    except _S3_TROUBLE as exc:
+        # A cold run with no reachable snapshot is slow and re-keys events, which
+        # is bad — but failing here would mean no scrape at all, which is worse.
+        return _skip(f"fetch failed ({type(exc).__name__}) — starting cold")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = gzip.decompress(body)

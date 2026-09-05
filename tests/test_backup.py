@@ -110,3 +110,30 @@ def test_snapshot_without_a_bucket_skips_instead_of_failing(tmp_path, monkeypatc
 
 def test_snapshot_without_a_database_skips(r2, tmp_path):
     assert backup.snapshot(tmp_path / "missing.db")["skipped"] is True
+
+
+# --- a misconfigured backup must never take down the pipeline --------------------
+
+def test_snapshot_to_a_missing_bucket_skips_rather_than_raising(r2, tmp_path, monkeypatch):
+    """The publish is the job; the safety net failing must not stop the feed."""
+    monkeypatch.setenv("R2_BACKUP_BUCKET", "typo-does-not-exist")
+    db = tmp_path / "pipeline.db"
+    _db(db)
+    assert backup.snapshot(db)["skipped"] is True
+
+
+def test_restore_from_a_missing_bucket_skips_rather_than_raising(r2, tmp_path, monkeypatch):
+    """This runs before the scrape — raising here would mean no run at all."""
+    monkeypatch.setenv("R2_BACKUP_BUCKET", "typo-does-not-exist")
+    assert backup.restore(tmp_path / "pipeline.db")["skipped"] is True
+
+
+def test_the_feed_bucket_refusal_is_still_loud(r2, tmp_path, monkeypatch):
+    """Tolerating S3 trouble must not tolerate pointing the backup at the feed."""
+    monkeypatch.setenv("R2_BACKUP_BUCKET", FEED_BUCKET)
+    db = tmp_path / "pipeline.db"
+    _db(db)
+    with pytest.raises(backup.BucketConfusion):
+        backup.snapshot(db)
+    with pytest.raises(backup.BucketConfusion):
+        backup.restore(db, force=True)

@@ -142,7 +142,16 @@ bucket churns at once. So each successful run also writes one rolling snapshot
 snapshot. Secret: `R2_BACKUP_BUCKET`, which **must not** be `R2_BUCKET`; the DB
 holds unredacted source prose and internal scoring, and the feed bucket is
 world-readable. Pointing both at one bucket raises `BucketConfusion` rather than
-uploading.
+uploading — that one refusal is loud, because it is a mistake no retry fixes.
+
+Every *other* backup failure is deliberately quiet. The restore runs before the
+scrape and the snapshot runs after the publish, so a bucket that is missing,
+misnamed, or outside the API token's scope would otherwise stop the feed from
+shipping over a safety net nobody needed that day. Both steps degrade to a logged
+skip, and both carry `continue-on-error`. Note the token: it needs write access
+to *both* buckets, and an R2 token scoped to the feed bucket alone will silently
+skip every snapshot — check for `db-snapshot` reporting `bytes` in the run log
+the first time.
 
 Secrets: `ANTHROPIC_API_KEY`, `TICKETMASTER_KEY`. The run waits ≤5 min for
 the Haiku batch (`--llm-poll 300`); an unfinished batch is collected by the next run.
