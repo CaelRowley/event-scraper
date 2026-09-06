@@ -127,9 +127,20 @@ client, so a blocked source cannot look healthy on the strength of one 200. The
 run reports `source_http` and `blocked_sources`, and the freshness gate fails on
 the latter.
 
-Being blocked is usually about *where* the request comes from rather than what it
-says: all four of those sources answer 200 from a laptop with either User-Agent.
-GitHub's runner IPs are what the WAFs object to, so no adapter change fixes it.
+Two things can earn a refusal. The first is what we send: a source that opts into
+`BROWSER_UA` now gets Chrome's companion headers too (`Sec-Ch-Ua`, `Sec-Fetch-*`,
+a real `Accept`), because claiming to be Chrome while sending none of them is
+trivially detectable — a filter does not need to fingerprint TLS to notice that
+"Chrome" forgot `Sec-Ch-Ua`. Caller headers still win, so an adapter asking for
+`application/json` is not handed Chrome's HTML `Accept`.
+
+The second is *where* the request comes from, and no header fixes that: all four
+of the refused sources answer 200 from a laptop with either User-Agent, which
+points at GitHub's runner IP ranges. Since a local test cannot reproduce a CI
+block, `blocked_sources` in the run telemetry is the only way to tell the two
+apart — if a source is still refused after the header change, the address is the
+problem and the options are an egress proxy, a self-hosted runner, or dropping it
+from `config.py`.
 
 **Verifying a publish.** A green workflow proves the scrape yielded events and the
 uploads returned 200 — not that the redaction fired or that the published shape is

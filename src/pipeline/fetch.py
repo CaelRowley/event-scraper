@@ -36,6 +36,42 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
+# The headers a real Chrome 131 sends alongside that User-Agent. Claiming to be a
+# browser while sending none of these is trivially detectable — a bot filter does
+# not need to fingerprint TLS to notice that "Chrome" forgot `Sec-Ch-Ua`. Sent
+# only for sources that opted into BROWSER_UA; the honest bot UA keeps its own
+# minimal, truthful header set.
+#
+# Accept-Encoding is deliberately absent: httpx negotiates it against what it can
+# actually decode, and advertising `br, zstd` we cannot unpack breaks the body.
+BROWSER_HEADERS = {
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,image/apng,*/*;q=0.8,"
+               "application/signed-exchange;v=b3;q=0.7"),
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Linux"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def _browser_headers(user_agent: str | None, extra: dict) -> dict:
+    """Caller headers, plus Chrome's companions when the caller claims to be Chrome.
+
+    The caller's own keys win: an adapter asking for `Accept: application/json`
+    means it, and the JSON APIs behind these WAFs would rightly reject a request
+    that says it wants HTML.
+    """
+    headers = dict(BROWSER_HEADERS) if user_agent == BROWSER_UA else {}
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    headers.update(extra)
+    return headers
+
 
 def _outcome(status: int) -> str:
     """Blocked means "the site refused us", not "the page is gone".
@@ -191,9 +227,7 @@ class Fetcher:
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
-        headers = dict(kwargs.pop("headers", {}))
-        if user_agent:
-            headers["User-Agent"] = user_agent
+        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
         return self._send("GET", url, headers=headers, **kwargs)
 
     def head(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
@@ -201,9 +235,7 @@ class Fetcher:
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
-        headers = dict(kwargs.pop("headers", {}))
-        if user_agent:
-            headers["User-Agent"] = user_agent
+        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
         return self._send("HEAD", url, headers=headers, **kwargs)
 
     def post(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
@@ -211,9 +243,7 @@ class Fetcher:
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
-        headers = dict(kwargs.pop("headers", {}))
-        if user_agent:
-            headers["User-Agent"] = user_agent
+        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
         return self._send("POST", url, headers=headers, **kwargs)
 
     def close(self) -> None:
