@@ -97,3 +97,68 @@ def test_no_accept_encoding_is_advertised():
     """httpx negotiates it; advertising br/zstd we cannot decode breaks the body."""
     from pipeline.fetch import BROWSER_HEADERS
     assert not any(k.lower() == "accept-encoding" for k in BROWSER_HEADERS)
+
+
+# --- the relay for hosts that refuse datacenter IPs ------------------------------
+
+def _fetcher(monkeypatch, *, proxy=True):
+    if proxy:
+        monkeypatch.setenv("FETCH_PROXY_URL", "https://relay.example/fetch")
+        monkeypatch.setenv("FETCH_PROXY_TOKEN", "s3cret")
+    else:
+        monkeypatch.delenv("FETCH_PROXY_URL", raising=False)
+        monkeypatch.delenv("FETCH_PROXY_TOKEN", raising=False)
+    return Fetcher(cache_path=None)
+
+
+def test_a_blocked_host_is_routed_through_the_relay(monkeypatch):
+    f = _fetcher(monkeypatch)
+    try:
+        url, headers = f._proxied("GET", "https://www.livegigs.de/berlin", {"User-Agent": "x"})
+        assert url.startswith("https://relay.example/fetch?url=")
+        assert "https%3A%2F%2Fwww.livegigs.de%2Fberlin" in url
+        assert headers["Authorization"] == "Bearer s3cret"
+        assert headers["User-Agent"] == "x", "the caller's headers must survive"
+    finally:
+        f.close()
+
+
+def test_every_other_host_still_goes_direct(monkeypatch):
+    f = _fetcher(monkeypatch)
+    try:
+        url, headers = f._proxied("GET", "https://api-v2.kulturdaten.berlin/x", {})
+        assert url == "https://api-v2.kulturdaten.berlin/x"
+        assert "Authorization" not in headers, "no token leaks to unrelated hosts"
+    finally:
+        f.close()
+
+
+def test_post_is_never_relayed(monkeypatch):
+    """RA's GraphQL POST is not blocked, and the relay refuses writes anyway."""
+    f = _fetcher(monkeypatch)
+    try:
+        url, _ = f._proxied("POST", "https://www.livegigs.de/berlin", {})
+        assert url == "https://www.livegigs.de/berlin"
+    finally:
+        f.close()
+
+
+def test_without_credentials_everything_goes_direct(monkeypatch):
+    f = _fetcher(monkeypatch, proxy=False)
+    try:
+        url, headers = f._proxied("GET", "https://www.livegigs.de/berlin", {})
+        assert url == "https://www.livegigs.de/berlin"
+        assert "Authorization" not in headers
+    finally:
+        f.close()
+
+
+def test_a_lookalike_host_is_not_relayed(monkeypatch):
+    """Membership is exact — livegigs.de.evil.com must not borrow the token."""
+    f = _fetcher(monkeypatch)
+    try:
+        url, headers = f._proxied("GET", "https://www.livegigs.de.evil.com/x", {})
+        assert url == "https://www.livegigs.de.evil.com/x"
+        assert "Authorization" not in headers
+    finally:
+        f.close()

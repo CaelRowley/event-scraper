@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "event-scraper-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2026-06-30",
+  "observability": { "enabled": true }
+  // PROXY_TOKEN is a secret: `npx wrangler secret put PROXY_TOKEN`
+}

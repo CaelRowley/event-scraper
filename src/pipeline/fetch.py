@@ -7,12 +7,13 @@ the per-domain bucket.
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 from protego import Protego
@@ -71,6 +72,18 @@ def _browser_headers(user_agent: str | None, extra: dict) -> dict:
         headers["User-Agent"] = user_agent
     headers.update(extra)
     return headers
+
+
+# Hosts that refuse GitHub's runner IPs while answering a laptop with the same
+# headers. Their robots.txt allows the paths we ask for, so this is a blanket
+# datacenter-IP rule, not a decision about this crawler — see proxy/worker.js.
+# Anything not listed here is fetched directly, as always.
+PROXIED_HOSTS = frozenset({
+    "www.livegigs.de",
+    "www.comedycafeberlin.com",
+    "comedyinenglish.de",
+    "www.eventbrite.de",
+})
 
 
 def _outcome(status: int) -> str:
@@ -140,6 +153,10 @@ class Fetcher:
         # is fetched off `self.client` directly and never reaches this, which is what
         # keeps a blocked source from looking healthy on the strength of one 200.
         self._source_http: dict[str, Counter] = defaultdict(Counter)
+        # Set both to route PROXIED_HOSTS through the relay; unset, every request
+        # goes direct and the blocked sources simply stay blocked.
+        self._proxy_url = os.environ.get("FETCH_PROXY_URL") or None
+        self._proxy_token = os.environ.get("FETCH_PROXY_TOKEN") or None
 
     # --- politeness -----------------------------------------------------------
 
@@ -186,6 +203,24 @@ class Fetcher:
 
     # --- requests --------------------------------------------------------------
 
+    def _proxied(self, method: str, url: str, headers: dict) -> tuple[str, dict]:
+        """Rewrite to the relay when this host needs it. Otherwise unchanged.
+
+        Only GET and HEAD: the relay refuses anything else, and the one POST we
+        make (RA's GraphQL) is not blocked. robots and the per-domain rate limit
+        were already applied to the real URL by the caller, so routing the bytes
+        elsewhere does not loosen either.
+        """
+        if not (self._proxy_url and self._proxy_token):
+            return url, headers
+        if method not in ("GET", "HEAD"):
+            return url, headers
+        if urlsplit(url).netloc not in PROXIED_HOSTS:
+            return url, headers
+        headers = dict(headers)
+        headers["Authorization"] = f"Bearer {self._proxy_token}"
+        return f"{self._proxy_url}?url={quote(url, safe='')}", headers
+
     @retry(
         retry=retry_if_exception(_retryable),
         stop=stop_after_attempt(3),
@@ -194,6 +229,8 @@ class Fetcher:
     )
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         deadline = time.monotonic() + MAX_RESPONSE_SECONDS
+        kwargs["headers"] = dict(kwargs.get("headers") or {})
+        url, kwargs["headers"] = self._proxied(method, url, kwargs["headers"])
         request = self.client.build_request(method, url, **kwargs)
         resp = self.client.send(request, stream=True)
         with self._counter_lock:

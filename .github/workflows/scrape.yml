@@ -47,6 +47,10 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional relay for the four sources that refuse this runner's IP.
+          # Unset, they stay blocked and the freshness gate says so.
+          FETCH_PROXY_URL: ${{ secrets.FETCH_PROXY_URL }}
+          FETCH_PROXY_TOKEN: ${{ secrets.FETCH_PROXY_TOKEN }}
           # Accept the original documented name and the TICKET_MASTER_KEY name
           # already configured in this repository; the Python adapter reads the
           # normalized TICKETMASTER_KEY environment variable either way.

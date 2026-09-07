@@ -136,11 +136,29 @@ trivially detectable — a filter does not need to fingerprint TLS to notice tha
 
 The second is *where* the request comes from, and no header fixes that: all four
 of the refused sources answer 200 from a laptop with either User-Agent, which
-points at GitHub's runner IP ranges. Since a local test cannot reproduce a CI
-block, `blocked_sources` in the run telemetry is the only way to tell the two
-apart — if a source is still refused after the header change, the address is the
-problem and the options are an egress proxy, a self-hosted runner, or dropping it
-from `config.py`.
+points at GitHub's runner IP ranges. Their robots.txt allows the paths we ask
+for, so the refusal is a blanket datacenter rule rather than a decision about
+this crawler.
+
+`proxy/` answers that: a Cloudflare Worker the scrape can route those four hosts
+through. Cloudflare's egress is not on the wrong side of the rule — all four
+answer 200 from it, measured before the Worker was written. It is deliberately
+not a general proxy: bearer token compared in constant time, an explicit host
+allowlist, GET and HEAD only, https only, and redirects that leave the allowlist
+are refused. A leaked token buys an attacker nothing but four sites we already
+scrape in public.
+
+```
+cd proxy && npx wrangler deploy && npx wrangler secret put PROXY_TOKEN
+gh secret set FETCH_PROXY_URL   --body "https://event-scraper-proxy.<subdomain>.workers.dev"
+gh secret set FETCH_PROXY_TOKEN --body "<the same token>"
+```
+
+Only `PROXIED_HOSTS` in `fetch.py` is routed; everything else goes direct. robots
+and the per-domain rate limit are applied to the real URL before the rewrite, so
+sending the bytes by another road loosens neither. With the secrets unset every
+request goes direct and the blocked sources simply stay blocked — which the
+freshness gate reports rather than hides.
 
 **Verifying a publish.** A green workflow proves the scrape yielded events and the
 uploads returned 200 — not that the redaction fired or that the published shape is
