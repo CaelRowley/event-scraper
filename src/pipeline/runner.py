@@ -22,6 +22,7 @@ from .categorise.rules import classify, classify_best_effort
 from .db import connect, queue_for_llm, reconcile_occurrences, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
+from .retention import prune_past
 from .fetch import Fetcher
 from .images import backfill_images
 from .linkcheck import check_images, check_links
@@ -177,6 +178,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
 
     export_stats = export_city(conn, city.slug, cfg.PUBLIC_DIR)
 
+    # After the export, deliberately: the window is today-forward, so nothing
+    # pruned here could have belonged in the feed we just wrote — and if this
+    # ever gets its cutoff wrong, it cannot take the feed down with it.
+    retention_stats = prune_past(conn, city.slug)
+    conn.commit()
+
     queue_size = conn.execute("SELECT COUNT(*) AS n FROM llm_queue").fetchone()["n"]
     # A source can fail without raising: adapters log an HTTP block and yield
     # nothing, so `errors` stays empty and the run looks healthy. Zero yield is not
@@ -209,6 +216,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "llm": llm_stats,
         "llm_queue_remaining": queue_size,
         "export": export_stats,
+        "retention": retention_stats,
         "http_requests": fetcher.requests_made,
     }
     log.info("run telemetry: %s", telemetry)

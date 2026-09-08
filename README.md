@@ -160,6 +160,24 @@ sending the bytes by another road loosens neither. With the secrets unset every
 request goes direct and the blocked sources simply stay blocked — which the
 freshness gate reports rather than hides.
 
+**Retention.** The export window is `today .. today + WINDOW_DAYS`, so an event
+stops being published the morning after it happens — and used to stay in the
+database forever anyway, along with its occurrences, raw snapshot, alias trail
+and unresolved LLM queue row. `retention.py` now deletes what is over, after the
+export so a wrong cutoff could never take the feed down with it.
+
+An event counts as over when its *last* occurrence is behind the cutoff — last,
+not first, because a run of an exhibition is one event with many dates.
+`RETAIN_PAST_DAYS` (2) is only a margin against clock skew and late-reported
+dates; the feed never showed those days regardless. Run telemetry reports what
+went as `retention`.
+
+`crawl_ledger` is deliberately left alone: it is keyed by URL and it is what
+`_discover()` reads to decide a sitemap page is new or changed, so dropping rows
+there reclaims little and makes the next run re-fetch pages it already knows.
+Pruning is safe to do aggressively now that ids are derived — a source
+re-reporting something we deleted brings it back under the same id.
+
 **Verifying a publish.** A green workflow proves the scrape yielded events and the
 uploads returned 200 — not that the redaction fired or that the published shape is
 the one this version writes; the freshness gate only counts events. Those are
