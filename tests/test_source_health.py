@@ -114,9 +114,9 @@ def _fetcher(monkeypatch, *, proxy=True):
 def test_a_blocked_host_is_routed_through_the_relay(monkeypatch):
     f = _fetcher(monkeypatch)
     try:
-        url, headers = f._proxied("GET", "https://www.livegigs.de/berlin", {"User-Agent": "x"})
+        url, headers = f._proxied("GET", "https://www.eventbrite.de/d/berlin/events/", {"User-Agent": "x"})
         assert url.startswith("https://relay.example/fetch?url=")
-        assert "https%3A%2F%2Fwww.livegigs.de%2Fberlin" in url
+        assert "https%3A%2F%2Fwww.eventbrite.de" in url
         assert headers["Authorization"] == "Bearer s3cret"
         assert headers["User-Agent"] == "x", "the caller's headers must survive"
     finally:
@@ -137,8 +137,8 @@ def test_post_is_never_relayed(monkeypatch):
     """RA's GraphQL POST is not blocked, and the relay refuses writes anyway."""
     f = _fetcher(monkeypatch)
     try:
-        url, _ = f._proxied("POST", "https://www.livegigs.de/berlin", {})
-        assert url == "https://www.livegigs.de/berlin"
+        url, _ = f._proxied("POST", "https://www.eventbrite.de/d/berlin/events/", {})
+        assert url == "https://www.eventbrite.de/d/berlin/events/"
     finally:
         f.close()
 
@@ -146,19 +146,19 @@ def test_post_is_never_relayed(monkeypatch):
 def test_without_credentials_everything_goes_direct(monkeypatch):
     f = _fetcher(monkeypatch, proxy=False)
     try:
-        url, headers = f._proxied("GET", "https://www.livegigs.de/berlin", {})
-        assert url == "https://www.livegigs.de/berlin"
+        url, headers = f._proxied("GET", "https://www.eventbrite.de/x", {})
+        assert url == "https://www.eventbrite.de/x"
         assert "Authorization" not in headers
     finally:
         f.close()
 
 
 def test_a_lookalike_host_is_not_relayed(monkeypatch):
-    """Membership is exact — livegigs.de.evil.com must not borrow the token."""
+    """Membership is exact — eventbrite.de.evil.com must not borrow the token."""
     f = _fetcher(monkeypatch)
     try:
-        url, headers = f._proxied("GET", "https://www.livegigs.de.evil.com/x", {})
-        assert url == "https://www.livegigs.de.evil.com/x"
+        url, headers = f._proxied("GET", "https://www.eventbrite.de.evil.com/x", {})
+        assert url == "https://www.eventbrite.de.evil.com/x"
         assert "Authorization" not in headers
     finally:
         f.close()

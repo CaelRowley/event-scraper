@@ -48,7 +48,7 @@ reports the active mode as `categorisation_mode`.
 | rausgegangen.de | sitemap + JSON-LD | national aggregator, Berlin-filtered |
 | tip-berlin.de | sitemap + JSON-LD | URL paths encode categories |
 | berlin.de | Simple-Search JSON | markets & street festivals; identifying UA required |
-| livegigs.de | JSON-LD in listing pages | concerts; full window in ~15 fetches |
+| ~~livegigs.de~~ | JSON-LD in listing pages | parked — refuses the runner's IP and the relay's |
 | eventbrite.de | `__SERVER_DATA__` blob (brace-matched) | workshops/talks/community long tail |
 | Ticketmaster | Discovery API (key) | supplement; minimal fields, refreshed every run |
 
@@ -153,6 +153,18 @@ cd proxy && npx wrangler deploy && npx wrangler secret put PROXY_TOKEN
 gh secret set FETCH_PROXY_URL   --body "https://event-scraper-proxy.<subdomain>.workers.dev"
 gh secret set FETCH_PROXY_TOKEN --body "<the same token>"
 ```
+
+Only eventbrite is routed, and only measurement settled that. A deployed Worker
+egresses from a different pool than `wrangler dev --remote`, so a probe against
+the preview environment said all four blocked sources would work and exactly one
+did. livegigs and the two Tribe comedy venues refuse the Worker as well, so they
+are parked in `config.py` rather than relayed — leaving them enabled cost a
+budget of 403s and failed the freshness gate, which stopped the entire feed from
+publishing over three sources that could not contribute anything. All three
+still answer 200 from a laptop; a self-hosted runner would bring them back.
+
+At two relayed requests per run, this sits four orders of magnitude inside the
+Workers free tier.
 
 Only `PROXIED_HOSTS` in `fetch.py` is routed; everything else goes direct. robots
 and the per-domain rate limit are applied to the real URL before the rewrite, so

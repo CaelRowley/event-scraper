@@ -20,12 +20,10 @@
  * `npx wrangler secret put PROXY_TOKEN`.
  */
 
-const ALLOWED_HOSTS = new Set([
-  "www.livegigs.de",
-  "www.comedycafeberlin.com",
-  "comedyinenglish.de",
-  "www.eventbrite.de",
-]);
+// Kept in step with PROXIED_HOSTS in fetch.py. Only eventbrite is here: the
+// other three refuse this Worker's egress too, so relaying them would spend a
+// request to receive the same 403.
+const ALLOWED_HOSTS = new Set(["www.eventbrite.de"]);
 
 const MAX_BYTES = 8 * 1024 * 1024;
 

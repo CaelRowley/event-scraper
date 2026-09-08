@@ -25,14 +25,20 @@ CITIES = {
             "kulturdaten",
             "berlin_de",
             "ra",
-            "livegigs",
             "rausgegangen",
             "tip_berlin",
-            "comedy_in_english",
-            "comedy_cafe",
             "prinzipal",
             "eventbrite",
             "ticketmaster",
+            # Off the list, not deleted: livegigs, comedy_in_english and
+            # comedy_cafe refuse both the runner's IP and the relay's, so every
+            # run spent its budget collecting 403s and then failed the freshness
+            # gate — which stopped the whole feed from publishing over three
+            # sources that could not have contributed anything.
+            #
+            # Nothing is wrong with the adapters; all three answer 200 from a
+            # laptop. Put them back the day the scrape runs from an address they
+            # accept — a self-hosted runner is the cheap version of that.
         ],
     ),
 }

@@ -74,16 +74,16 @@ def _browser_headers(user_agent: str | None, extra: dict) -> dict:
     return headers
 
 
-# Hosts that refuse GitHub's runner IPs while answering a laptop with the same
-# headers. Their robots.txt allows the paths we ask for, so this is a blanket
-# datacenter-IP rule, not a decision about this crawler — see proxy/worker.js.
-# Anything not listed here is fetched directly, as always.
-PROXIED_HOSTS = frozenset({
-    "www.livegigs.de",
-    "www.comedycafeberlin.com",
-    "comedyinenglish.de",
-    "www.eventbrite.de",
-})
+# Hosts worth routing through the relay: refused from the runner's IP, accepted
+# from Cloudflare's. Their robots.txt allows the paths we ask for, so the refusal
+# is a blanket datacenter-IP rule rather than a decision about this crawler.
+#
+# Only eventbrite qualifies, and only measurement settled that. livegigs and the
+# two Tribe comedy venues refuse the deployed Worker's egress as well — the pool
+# a deployed Worker sends from is not the one `wrangler dev --remote` uses, so an
+# earlier probe against the preview environment said all four would work and only
+# one did. Routing the other three here would spend a request to get the same 403.
+PROXIED_HOSTS = frozenset({"www.eventbrite.de"})
 
 
 def _outcome(status: int) -> str:
