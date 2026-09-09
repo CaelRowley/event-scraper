@@ -296,7 +296,10 @@ ceiling was the budget rather than Commons.
 Facts only (title/date/venue/price) except where a source's licence covers its prose
 — descriptions are carried for open-licensed sources only (CC-BY kulturdaten), and
 `description_public` gates that per event; every exported item links back to its
-original listing; honest identifying User-Agent with contact email (browser UA only
+original listing; honest identifying User-Agent naming this repository, so a site
+that wants us to stop has somewhere to say so — it used to carry a personal email
+and a repository URL that never existed, which made half the contact unreachable
+(browser UA only
 where a source blocks non-browser clients — RA, Eventbrite); robots.txt enforced via
 Protego; per-source kill switch in `config.py`; images are hotlinked with a
 placeholder fallback (no re-hosting); Ticketmaster fields are refreshed each run,
