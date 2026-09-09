@@ -10,7 +10,7 @@ from pipeline.categorise.taxonomy import LABELS
 from pipeline.db import connect, upsert_event
 from pipeline.models import Event, Occurrence, Price
 from pipeline.stock_photos import (
-    COMMONS_API, FALLBACK_PHOTO, backfill_stock_photos, query_candidates,
+    COMMONS_API, backfill_stock_photos, query_candidates,
     resolve, search_many, _strip_tracking,
 )
 
@@ -138,7 +138,6 @@ def test_a_miss_is_not_persisted_so_it_can_be_retried():
     assert stats["resolved"] == 0
     assert row["stock_image_url"] is None, "a miss must not be stored"
     assert row["stock_attempted_at"] is not None, "but the attempt must be recorded"
-    assert FALLBACK_PHOTO not in (row["stock_image_url"] or "")
 
 
 @respx.mock

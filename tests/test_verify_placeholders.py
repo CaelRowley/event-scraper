@@ -36,7 +36,15 @@ def test_every_category_has_a_keyword():
     assert set(KEYWORDS) == set(CATEGORIES)
 
 
-def test_export_emits_placeholder_only_when_imageless(tmp_path):
+def test_export_emits_no_placeholder_url_at_all(tmp_path):
+    """The client draws the empty state now; the feed does not name a photo.
+
+    LoremFlickr used to fill this in. It answered HTTP 500 for `art,gallery` —
+    471 events — and returned a photo for a keyword that meant nothing, so the
+    URLs were either broken or irrelevant. Both failure modes ended at the same
+    hardcoded fallback image in the client, which is how one disco ball came to
+    illustrate German courses and library readings.
+    """
     from datetime import date, timedelta
 
     from pipeline.export import export_city
@@ -55,8 +63,8 @@ def test_export_emits_placeholder_only_when_imageless(tmp_path):
     export_city(conn, "berlin", tmp_path)
     events = {e["title"]: e for e in
               json.loads((tmp_path / "berlin" / "index.json").read_text())["events"]}
-    assert events["A"]["placeholder_url"] is None
-    assert events["B"]["placeholder_url"] and "loremflickr" in events["B"]["placeholder_url"]
+    assert events["A"]["placeholder_url"] is None, "an event with a photo never had one"
+    assert events["B"]["placeholder_url"] is None, "and an imageless one no longer gets one either"
 
 
 # --- sanity checks -----------------------------------------------------------------

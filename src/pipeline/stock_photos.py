@@ -49,9 +49,15 @@ IMAGE_MIME_ALLOWLIST = frozenset({"image/jpeg", "image/png", "image/webp"})
 USER_AGENT = "events-pipeline/0.1 (+https://github.com/CaelRowley/event-scraper)"
 
 # A run resolves at most this many events. A cold database has thousands of
-# imageless events and each costs up to a handful of API calls, which would blow
-# the job's time budget; coverage builds up over successive runs instead.
-LOOKUP_BUDGET = 250
+# imageless events and each costs up to a handful of API calls, so this is a time
+# budget, not a correctness one; coverage builds up over successive runs.
+#
+# 250 took 2m33s of a 37-minute run against a 75-minute job limit, and every one
+# of the 250 resolved — the ceiling was the budget, not Commons. At ~0.6s an
+# event 1000 costs about ten minutes and clears a 3,500-event backlog in four
+# runs rather than fourteen, which matters now that a missing photo is a drawn
+# panel rather than a stock photo pretending otherwise.
+LOOKUP_BUDGET = 1000
 
 # How long before a miss is worth another try.
 RETRY_DAYS = 14
@@ -62,9 +68,9 @@ RETRY_DAYS = 14
 MAX_WORKERS = 4
 COMMONS_RATE = RateSpec(min_interval=0.25, jitter=(0.0, 0.1))
 
-# Last resort when Commons returns nothing at all. Deliberately NOT persisted —
-# see the module docstring.
-FALLBACK_PHOTO = "https://upload.wikimedia.org/wikipedia/commons/2/29/Disco_ball4.jpg"
+# (The hardcoded last-resort photo that used to live here is gone: it was never
+# referenced, and the client now draws a panel instead of showing someone else's
+# disco ball.)
 
 # Broad terms per category, tried after the event's own title/venue. Without
 # them every unmatched event collapses into one generic pool: a concert, a kids'

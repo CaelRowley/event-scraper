@@ -53,7 +53,15 @@ from .db import now_iso
 from .placeholders import placeholder_url
 from .redact import contains_contact, redact_contacts
 
-PLACEHOLDER_PROVIDER = "loremflickr"  # loremflickr | picsum | none
+# none: the client draws its own panel for an event with no photo (EventImage in
+# Gobento). LoremFlickr was the default and was worse than nothing: `art,gallery`
+# — 471 events, a third of all placeholders — answered HTTP 500 every time, and a
+# nonsense keyword still returned a photo, so the keyword never constrained the
+# result. Broken URLs became the client's hardcoded fallback image; irrelevant
+# ones became a random 640x360 photo on an event it had nothing to do with. It
+# also hotlinked CC images without per-image attribution, which placeholders.py
+# has flagged as unresolved since it was written.
+PLACEHOLDER_PROVIDER = "none"  # loremflickr | picsum | none
 
 # Bumped when the published shape changes incompatibly. The client compares it
 # against its own compiled constant and resets its cache on a mismatch, so an

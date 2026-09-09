@@ -277,12 +277,19 @@ city bounding box are dropped), **price sanity** (numeric values > 500 € are t
 as mis-parses and reverted to raw text), and **encoding health** (mojibake titles
 counted in telemetry). Results land in run telemetry.
 
-Imageless events get a `placeholder_url` in the feed: a category-matched stock image
-(LoremFlickr, CC images — "concert" for live music, "nightclub" for club events, …),
-deterministic per event id so cards differ from each other but never reshuffle.
-The demo labels them "stock"; provider configurable in `export.py`
-(`loremflickr` | `picsum` | `none`). Review the attribution caveat in
-`placeholders.py` before a public launch.
+Imageless events get **no** `placeholder_url`: the client draws its own panel
+from the category's colour and icon. LoremFlickr filled this slot until it was
+measured — `art,gallery` (471 events, a third of all placeholders) answered HTTP
+500 every time, and a nonsense keyword still returned a photo, so the keyword
+never constrained the result. Broken URLs and irrelevant ones both ended at the
+client's hardcoded fallback image, which is how one disco ball came to illustrate
+German courses and library readings. It also hotlinked CC images without
+per-image attribution, the caveat `placeholders.py` had flagged as unresolved.
+
+`stock_photos.py` remains the real answer for the gap: a Commons photo *of the
+venue*, properly attributed. Its budget is 1000 events per run — 250 took 2m33s
+of a 37-minute run against a 75-minute limit, and all 250 resolved, so the
+ceiling was the budget rather than Commons.
 
 ## Data & legal posture
 
