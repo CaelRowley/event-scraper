@@ -60,8 +60,30 @@ def _probe(fetcher, url: str) -> int | None:
         return None
 
 
+def _kill_linkless(conn, city: str) -> int:
+    """Purge cluster heads whose source_url was never a real link (empty string, or a
+    bare-host/relative value that never resolved to http(s)://...).
+
+    These aren't probe failures — the adapter had nothing to link to when the row was
+    written, so there is no live/dead ambiguity to wait out with strikes. Adapters were
+    fixed to stop emitting such rows going forward; this clears rows written before
+    that fix out of the feed.
+    """
+    now = now_iso()
+    cur = conn.execute(
+        """UPDATE events SET link_dead_at=? WHERE city=? AND canonical_id=id
+             AND link_dead_at IS NULL AND source_url NOT LIKE 'http%'""",
+        (now, city),
+    )
+    return cur.rowcount
+
+
 def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
     conn.executescript(SCHEMA)
+    killed_linkless = _kill_linkless(conn, city)
+    promoted_linkless = _promote_survivors(conn) if killed_linkless else 0
+    if killed_linkless:
+        conn.commit()
     today = datetime.now(timezone.utc).date().isoformat()
     due_before = (datetime.now(timezone.utc) - timedelta(days=RECHECK_DAYS)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -77,7 +99,10 @@ def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
         (city, today, due_before),
     ).fetchall()
 
-    stats = {"due": len(rows), "checked": 0, "strikes": 0, "killed": 0, "promoted": 0}
+    stats = {
+        "due": len(rows), "checked": 0, "strikes": 0,
+        "killed": killed_linkless, "promoted": promoted_linkless,
+    }
     for row in rows:
         if stats["checked"] >= budget:
             break

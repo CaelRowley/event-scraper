@@ -70,7 +70,8 @@ class TicketmasterAdapter(SourceAdapter):
         name = (entry.get("name") or "").strip()
         dates = (entry.get("dates") or {}).get("start", {})
         start = dates.get("dateTime") or dates.get("localDate")
-        if not name or not start:
+        source_url = entry.get("url") or ""
+        if not name or not start or not source_url:
             return None
         venues = (entry.get("_embedded") or {}).get("venues") or [{}]
         venue = venues[0]
@@ -97,7 +98,7 @@ class TicketmasterAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=str(entry.get("id")),
-            source_url=entry.get("url") or "",
+            source_url=source_url,
             title=name,
             start=start,
             date_only="T" not in str(start),

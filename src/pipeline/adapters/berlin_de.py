@@ -62,7 +62,8 @@ class BerlinDeAdapter(SourceAdapter):
     def _to_raw(self, item: dict, endpoint: str, spec: dict) -> RawEvent | None:
         title = (item.get(spec["title"]) or "").strip()
         start = (item.get("von") or "").strip()  # dd.mm.yyyy
-        if not title or not start:
+        source_url = ensure_scheme((item.get("www") or "").strip())
+        if not title or not start or not source_url:
             return None
         end = (item.get("bis") or "").strip() or None
         zeit = (item.get("zeit") or "").strip()
@@ -70,7 +71,7 @@ class BerlinDeAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=f"{endpoint}-{item.get('id')}",
-            source_url=ensure_scheme((item.get("www") or "").strip()) or f"{BASE}/{endpoint}/",
+            source_url=source_url,
             title=title,
             start=start,
             end=end,

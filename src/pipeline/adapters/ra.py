@@ -82,7 +82,7 @@ class ResidentAdvisorAdapter(SourceAdapter):
 
     def _to_raw(self, entry: dict) -> RawEvent | None:
         ev = entry.get("event") or {}
-        if not ev.get("id") or not ev.get("title") or not ev.get("startTime"):
+        if not ev.get("id") or not ev.get("title") or not ev.get("startTime") or not ev.get("contentUrl"):
             return None
         venue = ev.get("venue") or {}
         loc = venue.get("location") or {}

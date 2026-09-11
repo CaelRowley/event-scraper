@@ -81,7 +81,8 @@ class EventbriteAdapter(SourceAdapter):
     def _to_raw(self, entry: dict) -> RawEvent | None:
         name = (entry.get("name") or "").strip()
         start_date = entry.get("start_date")
-        if not name or not start_date or entry.get("is_online_event"):
+        source_url = entry.get("url") or ""
+        if not name or not start_date or entry.get("is_online_event") or not source_url:
             return None
         start_time = entry.get("start_time") or ""
         start = f"{start_date}T{start_time}" if start_time else start_date
@@ -109,7 +110,7 @@ class EventbriteAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=str(entry["id"]),
-            source_url=entry.get("url") or "",
+            source_url=source_url,
             title=name,
             start=start,
             end=end,

@@ -94,7 +94,8 @@ class TribeEventsAdapter(SourceAdapter):
         title = _strip_html(entry.get("title") or "")
         start = entry.get("start_date")
         eid = entry.get("id")
-        if not title or not start or eid is None:
+        source_url = entry.get("url") or ""
+        if not title or not start or eid is None or not source_url:
             return None
         all_day = bool(entry.get("all_day"))
         # Tribe emits "YYYY-MM-DD HH:MM:SS"; the normaliser wants ISO 'T' separators.
@@ -109,7 +110,7 @@ class TribeEventsAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=str(eid),
-            source_url=entry.get("url") or self.base_url,
+            source_url=source_url,
             title=title,
             start=start,
             end=end,
