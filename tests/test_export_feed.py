@@ -172,3 +172,34 @@ def test_export_city_removes_superseded_hashed_objects(tmp_path: Path):
     # "Nothing To Show" is unlisted, so only the two presentable events have objects
     assert len(names) == 2 and len({n.split(".")[0] for n in names}) == 2, \
         f"one object per listed event, no stale hashes: {names}"
+
+
+def test_buffer_day_is_scraped_but_not_published(tmp_path: Path):
+    """The scrape horizon runs one day past the export horizon.
+
+    An event on the buffer day is stored, so it gets a second pass before its
+    first publication, but it must not reach the feed until the window slides
+    onto it — otherwise the feed's last day is always the one discovered minutes
+    earlier, the thinnest and least verified day in it.
+    """
+    from pipeline import config as cfg
+
+    assert cfg.SCRAPE_WINDOW_DAYS == cfg.EXPORT_WINDOW_DAYS + 1
+
+    edge = (date.today() + timedelta(days=cfg.EXPORT_WINDOW_DAYS)).isoformat()
+    buffer_day = (date.today() + timedelta(days=cfg.SCRAPE_WINDOW_DAYS)).isoformat()
+
+    conn = connect(":memory:")
+    upsert_event(conn, _ev("edge", "Last Published Day", edge, 20, img="http://i/e"))
+    upsert_event(conn, _ev("buffer", "One Day Too Far", buffer_day, 20, img="http://i/b"))
+    conn.commit()
+
+    export_city(conn, "berlin", tmp_path)
+    city = tmp_path / "berlin"
+    manifest = json.loads((city / "manifest.json").read_text())
+    rows = json.loads(gzip.decompress((city / manifest["feed"]["url"]).read_bytes()))
+
+    titles = {r["title"] for r in rows}
+    assert "Last Published Day" in titles
+    assert "One Day Too Far" not in titles, "the buffer day must not reach the feed"
+    assert manifest["window"]["to"] == edge

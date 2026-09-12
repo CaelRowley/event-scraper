@@ -1,7 +1,7 @@
 """Delete events that are over, and everything hanging off them.
 
-Nothing used to remove anything. The export only ever looks at `today ..
-today + WINDOW_DAYS`, so a concert from last March stopped being published the
+Nothing used to remove anything. The export only ever looks at `today .. today +
+EXPORT_WINDOW_DAYS`, so a concert from last March stopped being published the
 morning after it happened — and then stayed in the database forever, with its
 occurrences, its raw snapshot, its alias trail and its unresolved LLM queue row.
 The published feed prunes itself; the database it comes from did not.

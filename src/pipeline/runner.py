@@ -53,7 +53,7 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
     try:
         adapter = adapter_cls(fetcher, conn)  # adapter DDL lands on this thread's conn
         log.info("=== source: %s", slug)
-        for raw in adapter.fetch_events(window_days=cfg.WINDOW_DAYS, limit=limit):
+        for raw in adapter.fetch_events(window_days=cfg.SCRAPE_WINDOW_DAYS, limit=limit):
             ev = to_event(raw, city.slug, city.tz)
             if ev is None:
                 continue

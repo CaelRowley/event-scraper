@@ -340,7 +340,7 @@ def _remove_superseded(city_dir: Path, built: dict) -> None:
 def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
     today = date.today()
     date_from = today.isoformat()
-    date_to = (today + timedelta(days=cfg.WINDOW_DAYS)).isoformat()
+    date_to = (today + timedelta(days=cfg.EXPORT_WINDOW_DAYS)).isoformat()
     rows = conn.execute(
         """SELECT e.*, o.starts_at_utc, o.ends_at_utc, o.starts_at_local, o.doors_at_local,
                   o.nightlife_date, o.time_unknown, o.status AS occ_status

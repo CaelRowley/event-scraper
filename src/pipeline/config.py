@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 DB_PATH = "data/pipeline.db"
 HTTP_CACHE_PATH = "data/http_cache.db"
 PUBLIC_DIR = "public"
-WINDOW_DAYS = 31  # scrape + export horizon (~1 month ahead)
+# Scrape one day further ahead than the feed publishes. Without the gap, the last
+# day of the feed is always the day first discovered on that very run — the
+# thinnest, least-verified day in it, and the one most likely to gain events
+# tomorrow. The buffer day lands in the database, gets a second pass, and is
+# published the next morning as a settled day.
+SCRAPE_WINDOW_DAYS = 31  # how far ahead adapters are asked to look
+EXPORT_WINDOW_DAYS = 30  # how far ahead the feed publishes
 
 
 @dataclass

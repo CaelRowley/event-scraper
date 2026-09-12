@@ -2,7 +2,12 @@ name: scrape
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # daily full run: crawl + dedup + Haiku batch + export (~05:00 Berlin)
+    # Two runs a day. The full run is the authoritative refresh of the whole
+    # window; the delta run exists so an event announced with a few days' notice
+    # is not invisible for up to 24 hours. Keep the cron strings byte-identical
+    # to the MODE expression below — that is what distinguishes them.
+    - cron: "0 3 * * *"    # full: every source, crawl + dedup + Haiku batch + export (~05:00 Berlin)
+    - cron: "0 13 * * *"   # delta: cheap_delta sources only (~15:00 Berlin)
   workflow_dispatch:
     inputs:
       mode:
@@ -55,7 +60,10 @@ jobs:
           # already configured in this repository; the Python adapter reads the
           # normalized TICKETMASTER_KEY environment variable either way.
           TICKETMASTER_KEY: ${{ secrets.TICKETMASTER_KEY || secrets.TICKET_MASTER_KEY }}
-          MODE: ${{ github.event.inputs.mode || 'full' }}
+          # Scheduled runs pick their mode from which cron fired; a manual run
+          # uses its input. `github.event.schedule` is empty for workflow_dispatch,
+          # so the dispatch input always wins.
+          MODE: ${{ github.event.inputs.mode || (github.event.schedule == '0 13 * * *' && 'delta' || 'full') }}
           # repo variable (Settings → Variables): set to a positive number for a
           # quick dev smoke run — caps events/source and makes the R2 publish
           # upload-only (see below). 0 (or unset) = normal full scrape.
@@ -83,8 +91,12 @@ jobs:
           print(f"blocked: {t.get('blocked_sources', [])}")
           if total == 0:
               sys.exit("ALERT: zero events ingested — every source failed or yielded nothing")
-          if len(t["errors"]) >= 3:
-              sys.exit(f"ALERT: {len(t['errors'])} sources failed: {list(t['errors'])}")
+          # Absolute AND proportional: three dead sources is bad in any run, but a
+          # delta run only has three to begin with, so "3 failed" there means
+          # everything failed and the absolute rule alone would never fire early.
+          failed, ran = len(t["errors"]), len(t["sources"])
+          if failed and (failed >= 3 or failed * 2 >= ran):
+              sys.exit(f"ALERT: {failed} of {ran} sources failed: {list(t['errors'])}")
           # A source that logged an HTTP block and yielded nothing never reaches
           # `errors` — adapters contain those and return empty. Zero yield alone is
           # not the signal (a sitemap source with no new pages is healthy); every
@@ -146,7 +158,7 @@ jobs:
       # activity — so land one only when the branch is actually going stale.
       # Normal development resets the clock on its own and this stays a no-op.
       - name: Keep schedule alive
-        if: github.event_name == 'schedule'
+        if: github.event.schedule == '0 3 * * *'
         run: |
           age_days=$(( ( $(date -u +%s) - $(git log -1 --format=%ct) ) / 86400 ))
           if [ "$age_days" -lt 50 ]; then
