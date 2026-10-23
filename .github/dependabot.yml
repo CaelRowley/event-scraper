@@ -1,0 +1,18 @@
+# Dependency upgrades arrive as PRs, where test.yml runs against them, instead of
+# landing silently in the next scrape (which is how selectolax 1.0 broke it).
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

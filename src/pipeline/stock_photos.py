@@ -28,6 +28,7 @@ the feed so the UI can credit it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -76,22 +77,45 @@ COMMONS_RATE = RateSpec(min_interval=0.25, jitter=(0.0, 0.1))
 # them every unmatched event collapses into one generic pool: a concert, a kids'
 # workshop and an exhibition have nothing in common, so a shared pool both
 # starves relevance and multiplies collisions.
+#
+# Several per category, and each returns up to SEARCH_LIMIT photos: with two
+# queries × five results a category ran dry after ten photos and every event
+# past that showed the same one.
 CATEGORY_QUERIES = {
-    "art_exhibitions": ["art gallery exhibition", "museum art"],
-    "club_nightlife": ["nightclub dance party", "DJ club night"],
-    "family_kids": ["children playing family", "kids activity"],
-    "community_causes": ["community gathering people", "volunteers group"],
-    "workshops_classes": ["workshop class learning", "craft workshop"],
-    "theatre_performance": ["theatre stage performance", "actors stage"],
-    "live_music": ["concert live music", "band stage performance"],
-    "festivals": ["festival crowd outdoor", "street festival"],
-    "talks_literature": ["lecture audience", "book reading library"],
-    "film_cinema": ["cinema movie theatre", "film screening"],
-    "comedy": ["comedy stage microphone", "stand-up comedy"],
-    "sports_fitness": ["sports fitness people", "gym exercise"],
-    "markets_fairs": ["market stalls fair", "street market"],
-    "food_drink": ["restaurant food dining", "cafe drinks"],
+    "art_exhibitions": ["art gallery exhibition", "museum art", "contemporary art installation",
+                        "painting exhibition visitors", "sculpture museum", "Berlin museum interior"],
+    "club_nightlife": ["nightclub dance party", "DJ club night", "dance floor lights",
+                       "techno party", "DJ mixer turntables", "Berlin nightlife"],
+    "family_kids": ["children playing family", "kids activity", "children museum workshop",
+                    "playground children", "puppet theatre children", "family outing park"],
+    "community_causes": ["community gathering people", "volunteers group", "neighbourhood meeting",
+                         "community garden", "public discussion panel", "Berlin library"],
+    "workshops_classes": ["workshop class learning", "craft workshop", "pottery class",
+                          "painting class", "sewing workshop", "language course classroom"],
+    "theatre_performance": ["theatre stage performance", "actors stage", "ballet performance",
+                            "opera stage", "dance performance stage", "theatre auditorium"],
+    "live_music": ["concert live music", "band stage performance", "jazz concert",
+                   "orchestra concert hall", "singer microphone concert", "guitarist live"],
+    "festivals": ["festival crowd outdoor", "street festival", "open air festival",
+                  "carnival parade", "festival stage night", "Berlin street fair"],
+    "talks_literature": ["lecture audience", "book reading library", "author reading",
+                         "panel discussion audience", "bookshop interior", "library reading room"],
+    "film_cinema": ["cinema movie theatre", "film screening", "cinema auditorium seats",
+                    "open air cinema", "film projector", "Berlin cinema"],
+    "comedy": ["comedy stage microphone", "stand-up comedy", "comedian performing",
+               "audience laughing", "cabaret stage", "improv theatre"],
+    "sports_fitness": ["sports fitness people", "gym exercise", "running race city",
+                       "yoga class", "football match stadium", "cycling race"],
+    "markets_fairs": ["market stalls fair", "street market", "flea market",
+                      "farmers market vegetables", "christmas market", "Berlin market hall"],
+    "food_drink": ["restaurant food dining", "cafe drinks", "street food stall",
+                   "wine tasting", "craft beer bar", "food market"],
+    "other": ["Berlin street life", "people city event", "Berlin architecture",
+              "crowd gathering", "Berlin Kreuzberg", "Berlin Spree river"],
 }
+
+# Results per Commons query (its API allows up to 50).
+SEARCH_LIMIT = 40
 
 
 def query_candidates(event) -> list[str]:
@@ -177,7 +201,7 @@ def search_many(client, query: str) -> list[tuple[str, dict | None]]:
         # otherwise happily returns.
         "gsrsearch": f"{query} filetype:bitmap",
         "gsrnamespace": "6",  # File:
-        "gsrlimit": "5",
+        "gsrlimit": str(SEARCH_LIMIT),
         "prop": "imageinfo",
         "iiprop": "url|mime|extmetadata",
         "iiurlwidth": "800",  # gives us a resized `thumburl`
@@ -224,12 +248,19 @@ def candidates(client, event, claimed: set[str]) -> list[tuple[str, dict | None]
     return out
 
 
-def pick(ranked: list[tuple[str, dict | None]], claimed: set[str]) -> tuple[str, dict | None] | None:
-    """First unclaimed candidate; failing that the top one — a repeat still beats a blank card."""
+def pick(ranked: list[tuple[str, dict | None]], claimed: set[str],
+         key: str = "") -> tuple[str, dict | None] | None:
+    """First unclaimed candidate; failing that a repeat — still better than a blank card.
+
+    The repeat is spread across the candidates by `key` (the event id) instead of
+    always the top hit, so an exhausted pool shows many photos, not one.
+    """
     for url, attribution in ranked:
         if url not in claimed:
             return url, attribution
-    return ranked[0] if ranked else None
+    if not ranked:
+        return None
+    return ranked[int(hashlib.sha1(key.encode()).hexdigest()[:8], 16) % len(ranked)]
 
 
 def resolve(client, event, claimed: set[str]) -> tuple[str, dict | None] | None:
@@ -251,6 +282,36 @@ def _due(last_attempt: str | None, now: datetime) -> bool:
     return now - seen > timedelta(days=RETRY_DAYS)
 
 
+# Bump to re-resolve every event that shares its stock photo with another, once.
+# 2: the pool grew from 5 results per query to SEARCH_LIMIT.
+POOL_VERSION = 2
+
+
+def _release_duplicates(conn) -> int:
+    """Clear stock photos assigned from an older, smaller pool where they collide.
+
+    A stored photo is never retried, so without this the events that got a repeat
+    under the old pool would keep it forever. One event per photo keeps it; the
+    rest go back into the queue. Runs once per POOL_VERSION.
+    """
+    row = conn.execute("SELECT value FROM kv WHERE key='stock_pool_version'").fetchone()
+    if row and int(row["value"]) >= POOL_VERSION:
+        return 0
+    cur = conn.execute(
+        """UPDATE events SET stock_image_url=NULL, stock_attribution=NULL, stock_attempted_at=NULL
+            WHERE stock_image_url IS NOT NULL
+              AND rowid NOT IN (SELECT MIN(rowid) FROM events
+                                 WHERE stock_image_url IS NOT NULL GROUP BY stock_image_url)"""
+    )
+    conn.execute(
+        "INSERT INTO kv(key, value) VALUES('stock_pool_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(POOL_VERSION),),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
                           fetcher: Fetcher | None = None) -> dict:
     """Resolve Commons photos for imageless events in the feed window.
@@ -259,11 +320,21 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
     one a plain client is used (tests, ad-hoc runs).
     """
     now = datetime.now(timezone.utc)
+    released = _release_duplicates(conn)
 
+    today = now.date().isoformat()
+
+    # Only photos actually on show count as taken: once an event is over, gets its
+    # own image or drops out, its stand-in is free for another event.
     claimed = {
         r["stock_image_url"]
         for r in conn.execute(
-            "SELECT stock_image_url FROM events WHERE stock_image_url IS NOT NULL"
+            """SELECT e.stock_image_url FROM events e
+                WHERE e.stock_image_url IS NOT NULL AND e.link_dead_at IS NULL
+                  AND (e.image_url IS NULL OR e.image_url = '')
+                  AND EXISTS (SELECT 1 FROM occurrences o
+                               WHERE o.event_id = e.id AND o.nightlife_date >= ?)""",
+            (today,),
         )
     }
 
@@ -275,13 +346,15 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
               AND (e.image_url IS NULL OR e.image_url = '')
               AND e.stock_image_url IS NULL
               AND e.link_dead_at IS NULL
+              AND EXISTS (SELECT 1 FROM occurrences o
+                           WHERE o.event_id = e.id AND o.nightlife_date >= ?)
             ORDER BY e.first_seen_at DESC""",
-        (city,),
+        (city, today),
     ).fetchall()
 
     due = [r for r in rows if _due(r["stock_attempted_at"], now)][:budget]
     if not due:
-        return {"considered": len(rows), "attempted": 0, "resolved": 0}
+        return {"considered": len(rows), "attempted": 0, "resolved": 0, "released": released}
 
     resolved = 0
     plain = None
@@ -295,7 +368,7 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
         with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="commons") as pool:
             ranked = list(pool.map(lambda row: candidates(client, row, claimed), due))
         for row, options in zip(due, ranked):
-            hit = pick(options, claimed)
+            hit = pick(options, claimed, key=row["id"])
             # Record the attempt either way — that is what stops a hopeless event
             # being retried on every single run.
             conn.execute(
@@ -315,6 +388,7 @@ def backfill_stock_photos(conn, city: str, budget: int = LOOKUP_BUDGET,
             plain.close()
     conn.commit()
 
-    log.info("stock photos: %d considered, %d attempted, %d resolved",
-             len(rows), len(due), resolved)
-    return {"considered": len(rows), "attempted": len(due), "resolved": resolved}
+    log.info("stock photos: %d considered, %d attempted, %d resolved, %d released",
+             len(rows), len(due), resolved, released)
+    return {"considered": len(rows), "attempted": len(due), "resolved": resolved,
+            "released": released}

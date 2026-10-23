@@ -188,7 +188,7 @@ def test_runner_isolates_adapter_failures(tmp_path, monkeypatch):
     for name in ("backfill_images", "check_links", "check_images"):
         monkeypatch.setattr(runner_mod, name, lambda conn, fetcher, city: {})
 
-    telemetry = run("berlin", no_llm=True, db_path=db)
+    telemetry = run("berlin", db_path=db)
 
     assert list(telemetry["errors"]) == ["fake_boom"]
     assert telemetry["sources"]["fake_ok"] == 2
@@ -198,3 +198,42 @@ def test_runner_isolates_adapter_failures(tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM events WHERE source_slug='fake_boom'").fetchone()[0] == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM events WHERE source_slug='fake_ok'").fetchone()[0] == 2
+
+
+def test_a_failing_enrichment_phase_does_not_cost_the_export(tmp_path, monkeypatch):
+    db = str(tmp_path / "run.db")
+    monkeypatch.setattr(cfg, "HTTP_CACHE_PATH", None)
+    monkeypatch.setattr(cfg, "PUBLIC_DIR", str(tmp_path / "public"))
+    monkeypatch.setattr(cfg, "select_adapters", lambda city, **kw: [("fake_ok", FakeAdapterOK)])
+
+    def boom(*a, **kw):
+        raise RuntimeError("link checker exploded")
+
+    monkeypatch.setattr(runner_mod, "backfill_images", lambda conn, fetcher, city: {})
+    monkeypatch.setattr(runner_mod, "check_links", boom)
+    monkeypatch.setattr(runner_mod, "check_images", lambda conn, fetcher, city: {})
+    monkeypatch.setattr(runner_mod, "backfill_stock_photos", lambda conn, city, fetcher: {})
+
+    telemetry = run("berlin", db_path=db)
+
+    assert telemetry["phase_errors"] == {"links": "RuntimeError: link checker exploded"}
+    # the feed must still be exported (the fake events sit past the window, so it is empty)
+    assert "feed_hash" in telemetry["export"]
+    assert (tmp_path / "public" / "berlin" / "manifest.json").exists()
+
+
+def test_phases_past_the_deadline_are_skipped_not_run(tmp_path, monkeypatch):
+    db = str(tmp_path / "run.db")
+    monkeypatch.setattr(cfg, "HTTP_CACHE_PATH", None)
+    monkeypatch.setattr(cfg, "PUBLIC_DIR", str(tmp_path / "public"))
+    monkeypatch.setattr(cfg, "select_adapters", lambda city, **kw: [("fake_ok", FakeAdapterOK)])
+    monkeypatch.setattr(runner_mod, "ENRICH_DEADLINE_MINUTES", -1)
+    called = []
+    for name in ("backfill_images", "check_links", "check_images"):
+        monkeypatch.setattr(runner_mod, name, lambda conn, fetcher, city, n=name: called.append(n))
+
+    telemetry = run("berlin", db_path=db)
+
+    assert called == []
+    assert telemetry["links"] == {"skipped": "deadline"}
+    assert "feed_hash" in telemetry["export"]

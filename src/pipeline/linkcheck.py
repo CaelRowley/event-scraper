@@ -17,10 +17,14 @@ from urllib.parse import urlsplit
 from .db import now_iso
 from .dedup import SOURCE_PRIORITY
 from .fetch import BROWSER_UA, RateSpec
+from .probe import fan_out, select
 
 log = logging.getLogger(__name__)
 
 CHECK_BUDGET = 250
+# No single host may take more than this much of a phase's budget — its URLs run
+# back to back, so the biggest host's share is roughly the phase's wall time.
+PER_HOST = 100
 RECHECK_DAYS = 3
 STRIKES_TO_KILL = 2
 MIN_STRIKE_GAP = timedelta(hours=20)
@@ -32,6 +36,10 @@ RATE = RateSpec(min_interval=1.0, jitter=(0.2, 0.8))
 # kulturdaten record URLs: the adapter re-pages the full listing every run, so an
 # event's presence there IS the liveness signal — probing the API record is redundant.
 SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin")
+# Same reasoning by source rather than host: kulturdaten events now link to the
+# berlin.de calendar page it imports from, and the adapter's full re-page every
+# run is still the liveness signal — retention and reconcile drop what vanished.
+LISTING_SOURCES = ("kulturdaten", "ra")
 BROWSER_UA_HOSTS = ("eventbrite.de", "eventbrite.com")
 
 SCHEMA = """
@@ -94,22 +102,21 @@ def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
            LEFT JOIN link_checks lc ON lc.url = e.source_url
            WHERE e.city=? AND e.canonical_id=e.id AND e.link_dead_at IS NULL
              AND o.nightlife_date >= ? AND e.source_url LIKE 'http%'
+             AND e.source_slug NOT IN ({})
              AND (lc.url IS NULL OR lc.last_checked_at < ?)
-           ORDER BY lc.last_checked_at IS NOT NULL, lc.last_checked_at""",
-        (city, today, due_before),
+           ORDER BY lc.last_checked_at IS NOT NULL, lc.last_checked_at""".format(
+            ",".join("?" * len(LISTING_SOURCES))),
+        (city, today, *LISTING_SOURCES, due_before),
     ).fetchall()
 
     stats = {
         "due": len(rows), "checked": 0, "strikes": 0,
         "killed": killed_linkless, "promoted": promoted_linkless,
     }
-    for row in rows:
-        if stats["checked"] >= budget:
-            break
-        url = row["source_url"]
-        if any(urlsplit(url).netloc.endswith(h) for h in SKIP_HOSTS):
-            continue
-        status = _probe(fetcher, url)
+    urls = [r["source_url"] for r in rows
+            if not any(urlsplit(r["source_url"]).netloc.endswith(h) for h in SKIP_HOSTS)]
+    batch = select(urls, budget=budget, per_host=PER_HOST)
+    for url, status in fan_out(batch, lambda u: _probe(fetcher, u), fetcher=fetcher):
         stats["checked"] += 1
         now = now_iso()
         prev = conn.execute("SELECT * FROM link_checks WHERE url=?", (url,)).fetchone()
@@ -142,13 +149,14 @@ def check_links(conn, fetcher, city: str, budget: int = CHECK_BUDGET) -> dict:
         if strikes >= STRIKES_TO_KILL:
             stats["killed"] += _kill(conn, url, now)
             stats["promoted"] += _promote_survivors(conn)
-        conn.commit()  # per probe — this phase runs concurrently with the other checks
+        conn.commit()  # per probe — no write transaction spans the next result
     log.info("link check: %s", stats)
     return stats
 
 
 IMAGE_RECHECK_DAYS = 7
 IMAGE_BUDGET = 150
+IMAGE_PER_HOST = 75
 
 IMAGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS image_checks(
@@ -178,18 +186,9 @@ def check_images(conn, fetcher, city: str, budget: int = IMAGE_BUDGET) -> dict:
     ).fetchall()
 
     stats = {"due": len(rows), "checked": 0, "nulled": 0}
-    for row in rows:
-        if stats["checked"] >= budget:
-            break
-        url = row["image_url"]
-        status: int | None
-        content_type = ""
-        try:
-            resp = fetcher.head(url, rate=RATE, check_robots=False)
-            status = resp.status_code
-            content_type = resp.headers.get("content-type", "") if hasattr(resp, "headers") else ""
-        except Exception:  # noqa: BLE001 — transport errors are inconclusive
-            status = None
+    batch = select([r["image_url"] for r in rows], budget=budget, per_host=IMAGE_PER_HOST)
+    for url, (status, content_type) in fan_out(
+            batch, lambda u: _probe_image(fetcher, u), fetcher=fetcher):
         stats["checked"] += 1
         conn.execute(
             "INSERT INTO image_checks(url, last_status, last_checked_at) VALUES(?,?,?) "
@@ -204,9 +203,19 @@ def check_images(conn, fetcher, city: str, budget: int = IMAGE_BUDGET) -> dict:
         if dead:
             cur = conn.execute("UPDATE events SET image_url=NULL WHERE image_url=?", (url,))
             stats["nulled"] += cur.rowcount
-        conn.commit()  # per probe — this phase runs concurrently with the other checks
+        conn.commit()  # per probe — no write transaction spans the next result
     log.info("image check: %s", stats)
     return stats
+
+
+def _probe_image(fetcher, url: str) -> tuple[int | None, str]:
+    """(status, content-type) from a HEAD, or (None, "") when inconclusive."""
+    try:
+        resp = fetcher.head(url, rate=RATE, check_robots=False)
+    except Exception:  # noqa: BLE001 — transport errors are inconclusive
+        return None, ""
+    content_type = resp.headers.get("content-type", "") if hasattr(resp, "headers") else ""
+    return resp.status_code, content_type
 
 
 def _kill(conn, url: str, now: str) -> int:

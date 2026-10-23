@@ -145,3 +145,49 @@ def test_throttle_no_wait_across_domains(monkeypatch):
 )
 def test_ensure_scheme(raw, expected):
     assert ensure_scheme(raw) == expected
+
+
+def _counting_fetcher(status_for):
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(status_for(str(request.url)))
+
+    f = Fetcher(cache_path=None)
+    f.client = httpx.Client(transport=httpx.MockTransport(handler))
+    return f, calls
+
+
+FAST = RateSpec(min_interval=0.0, jitter=(0.0, 0.0))
+
+
+def test_a_host_refusing_every_request_is_given_up_on():
+    f, calls = _counting_fetcher(lambda url: 403 if "waf.example" in url else 200)
+    for i in range(fetch_mod.TRIP_AFTER):
+        assert f.get(f"https://waf.example/{i}", rate=FAST, check_robots=False).status_code == 403
+    assert f.tripped("https://waf.example/next")
+    sent = len(calls)
+    with pytest.raises(fetch_mod.HostBlockedError):
+        f.get("https://waf.example/next", rate=FAST, check_robots=False)
+    assert len(calls) == sent, "a tripped host must not be sent another request"
+    # and it is a PermissionError, which adapters already treat as "stop this source"
+    assert issubclass(fetch_mod.HostBlockedError, PermissionError)
+    # other hosts are unaffected
+    assert f.get("https://fine.example/", rate=FAST, check_robots=False).status_code == 200
+    assert f.tripped_hosts() == ["waf.example"]
+
+
+def test_one_success_resets_the_refusal_streak():
+    statuses = iter([403] * (fetch_mod.TRIP_AFTER - 1) + [200] + [403] * (fetch_mod.TRIP_AFTER - 1))
+    f, _ = _counting_fetcher(lambda url: next(statuses))
+    for i in range(2 * fetch_mod.TRIP_AFTER - 1):
+        f.get(f"https://flaky.example/{i}", rate=FAST, check_robots=False)
+    assert not f.tripped("https://flaky.example/")
+
+
+def test_404s_never_trip_the_breaker():
+    f, _ = _counting_fetcher(lambda url: 404)
+    for i in range(fetch_mod.TRIP_AFTER * 2):
+        f.get(f"https://gone.example/{i}", rate=FAST, check_robots=False)
+    assert not f.tripped("https://gone.example/")

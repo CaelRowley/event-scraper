@@ -58,8 +58,25 @@ TAG_MAP = {
     "InformationEvents": "community_causes",
     "Health": "community_causes",
     "Police": "community_causes",
-    # "Recreation" and "Walks" stay unmapped — too generic; keywords/LLM decide
+    # "Recreation" and "Walks" stay unmapped — too generic; keywords decide
 }
+
+# Every record observed so far is imported from berlin.de's district calendar
+# ("bezirkskalender"), and the attraction's originObjectID is that calendar's
+# detail id (verified 2026-10-23; an unknown id answers 404, so linkcheck works).
+# The *event's* originObjectID is a different, internal id — don't use it.
+CALENDAR_ORIGIN = "bezirkskalender"
+CALENDAR_DETAIL = "https://www.berlin.de/land/kalender/index.php?detail={}"
+
+
+def calendar_url(attraction: dict) -> str | None:
+    """Public berlin.de calendar page for an attraction, if it came from there."""
+    meta = attraction.get("metadata") or {}
+    oid = str(meta.get("originObjectID") or "").strip()
+    if meta.get("origin") != CALENDAR_ORIGIN or not oid.isdigit():
+        return None
+    return CALENDAR_DETAIL.format(oid)
+
 
 CACHE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS kd_attractions(id TEXT PRIMARY KEY, payload TEXT, fetched_at TEXT);
@@ -177,9 +194,11 @@ class KulturdatenAdapter(SourceAdapter):
         return RawEvent(
             source=self.slug,
             source_event_id=ident,
-            # human page when the attraction has one; the raw API record only as last resort
-            source_url=ensure_scheme(attr.get("website")) or ensure_scheme(external)
-            or f"{API}/events/{ident}",
+            # The berlin.de calendar page first: it is event-specific, usually carries
+            # a photo and links out to the organiser. The attraction's own website is
+            # often just the venue's homepage. The raw API record only as last resort.
+            source_url=calendar_url(attr) or ensure_scheme(attr.get("website"))
+            or ensure_scheme(external) or f"{API}/events/{ident}",
             title=title,
             start=start,
             end=end,

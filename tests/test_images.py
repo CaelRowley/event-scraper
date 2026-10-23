@@ -77,3 +77,28 @@ def test_image_scan_miss_retries_after_ttl():
 
     assert not scan_is_due(row, checked_at + timedelta(days=6))
     assert scan_is_due(row, checked_at + timedelta(days=8))
+
+
+BERLIN_CAL = "https://www.berlin.de/land/kalender/index.php?detail=271366"
+
+
+def test_berlin_calendar_photo_found_in_aria_main():
+    """kulturdaten's event pages: no article/main/figure, only role=main around the photo."""
+    html = """
+    <meta name="og:image" content="https://www.berlin.de/i9f/r1/images/favicon/Berlin_de_FB_Social.png">
+    <div role="main"><section class="modul-text_bild">
+      <div class="image"><img src="data/271366-1740055264.jpg" alt="Kidsführung"></div>
+      <img class="qr-print" src="qrcode.php?id=271366&type=calendar">
+    </section></div>
+    """
+    assert find_image(html, BERLIN_CAL) == "https://www.berlin.de/land/kalender/data/271366-1740055264.jpg"
+
+
+def test_berlin_calendar_without_photo_ignores_icons_and_qr_codes():
+    html = """
+    <div role="main">
+      <img src="/i9f/images/icon/piktogramm_rollstuhlgerecht.gif" alt="rollstuhlgerecht">
+      <img class="qr-print" src="qrcode.php?id=281089&type=web">
+    </div>
+    """
+    assert find_image(html, BERLIN_CAL) is None

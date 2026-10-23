@@ -124,6 +124,9 @@ def test_dead_image_nulled_only_for_hard_404():
                 raise result
             return result
 
+        def tripped(self, url):
+            return False
+
     conn = connect(":memory:")
     for sid, img in (("1", "https://img/dead.jpg"), ("2", "https://img/blocked.jpg"),
                      ("3", "https://img/html-page")):

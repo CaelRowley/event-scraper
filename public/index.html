@@ -190,7 +190,7 @@ load().catch(err => {
   document.getElementById("meta").textContent = `${err} — this demo runs on a local export.`;
   document.getElementById("grid").innerHTML =
     '<p>Generate it first:</p>' +
-    '<pre>python -m pipeline run --city berlin --limit 20 --no-llm\n' +
+    '<pre>python -m pipeline run --city berlin --limit 20\n' +
     'python -m http.server -d public 8000</pre>' +
     '<p>The published feed the app reads is a different shape ' +
     '(<code>manifest.json</code> + <code>feed.&lt;hash&gt;.json.gz</code>) and lives in R2.</p>';

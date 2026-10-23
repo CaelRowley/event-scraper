@@ -1,5 +1,5 @@
 # Bilingual (DE/EN) keyword rules. A rule family fires only when it is the SINGLE
-# matching family on title+description — multi-match goes to the LLM tier.
+# matching family on title+description — multi-match is resolved by match count.
 # Word-boundary regexes; case-insensitive. Versioned so reclassification is replayable.
 version: 1
 families:

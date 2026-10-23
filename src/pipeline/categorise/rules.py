@@ -1,7 +1,7 @@
 """Tiers 1–2 of the categorisation cascade.
 
 Order: source prior > explicit source field (schema @type / TM segment / adapter table)
-       > venue prior > keyword rules > LLM queue (tier 3) > fallback other.
+       > venue prior > keyword rules > best-effort keyword count > fallback other.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def keyword_tags(text: str) -> list[str]:
 def classify(ev: Event, *, source_prior: str | None = None,
              mapped_category: str | None = None,
              venue_prior: str | None = None) -> Classification | None:
-    """Tiers 1–2. Returns None when the event must go to the LLM queue."""
+    """Tiers 1–2. Returns None when the keywords are ambiguous or absent."""
     text = f"{ev.title} {ev.description or ''}"
     tags = keyword_tags(text)
 
@@ -79,7 +79,7 @@ def classify(ev: Event, *, source_prior: str | None = None,
     if len(hits) == 1:
         return Classification(hits[0], 0.7, "keyword", tags)
 
-    return None  # ambiguous (0 or 2+ families) → tier 3 LLM queue
+    return None  # ambiguous (0 or 2+ families) → classify_best_effort decides
 
 
 # Tie-break preference for rules-only mode, most-specific first: when "Konzert +
@@ -94,9 +94,9 @@ FAMILY_PRIORITY = [
 def classify_best_effort(ev: Event, *, source_prior: str | None = None,
                          mapped_category: str | None = None,
                          venue_prior: str | None = None) -> Classification | None:
-    """Rules-only mode: like classify(), but multi-family keyword matches are resolved
-    by match count (priority order breaks ties) instead of being deferred to the LLM.
-    Low confidence + its own tier, so the AI tier can upgrade these later."""
+    """What the pipeline runs: like classify(), but multi-family keyword matches are resolved
+    by match count (priority order breaks ties) instead of being left undecided.
+    Low confidence and its own tier, so these guesses stay distinguishable."""
     cls = classify(ev, source_prior=source_prior, mapped_category=mapped_category,
                    venue_prior=venue_prior)
     if cls is not None:

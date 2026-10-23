@@ -2,17 +2,19 @@ name: test
 
 on:
   push:
-    paths: ["src/**", "tests/**", "pyproject.toml"]
+    paths: ["src/**", "tests/**", "pyproject.toml", "uv.lock", ".github/workflows/**"]
   pull_request:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -e '.[dev]'
-      - run: python -m pytest -q
+          enable-cache: true
+      # --frozen: test exactly what the scrape job will install, and fail if
+      # pyproject.toml and uv.lock have drifted apart.
+      - run: uv sync --frozen --extra dev
+      - run: uv run --frozen pytest -q

@@ -86,6 +86,26 @@ def _browser_headers(user_agent: str | None, extra: dict) -> dict:
 PROXIED_HOSTS = frozenset({"www.eventbrite.de"})
 
 
+# A host that refuses this many requests in a row is not asked again for the rest
+# of the run. Without it, one WAF'd source spent ~14 minutes of every run on 229
+# straight 403s (tip-berlin, 2026-10-03), and the image scan and link check then
+# paid for the same refusals again.
+TRIP_AFTER = 8
+
+
+class HostBlockedError(PermissionError):
+    """The host has refused every recent request; this one was not sent.
+
+    A PermissionError on purpose: adapters already treat that as "stop this
+    source, don't burn the budget" (see robots handling), which is exactly right.
+    """
+
+
+def is_refusal(status: int) -> bool:
+    """403/405/429/451 — the site refused us, as opposed to the page being gone."""
+    return _outcome(status) == "blocked"
+
+
 def _outcome(status: int) -> str:
     """Blocked means "the site refused us", not "the page is gone".
 
@@ -155,6 +175,9 @@ class Fetcher:
         self._source_http: dict[str, Counter] = defaultdict(Counter)
         # Set both to route PROXIED_HOSTS through the relay; unset, every request
         # goes direct and the blocked sources simply stay blocked.
+        # Consecutive refusals per host, and the hosts that crossed TRIP_AFTER.
+        self._refusals: Counter = Counter()
+        self._tripped: set[str] = set()
         self._proxy_url = os.environ.get("FETCH_PROXY_URL") or None
         self._proxy_token = os.environ.get("FETCH_PROXY_TOKEN") or None
 
@@ -178,6 +201,31 @@ class Fetcher:
                 if wait > 0:
                     time.sleep(wait)
             self._last_request[domain] = time.monotonic()
+
+    # --- circuit breaker --------------------------------------------------------
+
+    def tripped(self, url: str) -> bool:
+        """Whether this URL's host has been given up on for the rest of the run."""
+        return urlsplit(url).netloc in self._tripped
+
+    def tripped_hosts(self) -> list[str]:
+        with self._counter_lock:
+            return sorted(self._tripped)
+
+    def _record_outcome(self, host: str, status: int) -> None:
+        # caller holds _counter_lock
+        if _outcome(status) == "blocked":
+            self._refusals[host] += 1
+            if self._refusals[host] >= TRIP_AFTER and host not in self._tripped:
+                self._tripped.add(host)
+                log.warning("%s refused %d requests in a row — skipping it for the rest "
+                            "of this run", host, self._refusals[host])
+        elif _outcome(status) == "ok":
+            self._refusals[host] = 0
+
+    def _guard(self, url: str) -> None:
+        if self.tripped(url):
+            raise HostBlockedError(f"{urlsplit(url).netloc} is refusing requests: {url}")
 
     def source_http(self) -> dict[str, dict[str, int]]:
         """`{thread name: {ok|blocked|other: n}}` — a snapshot, safe to call at the end."""
@@ -229,6 +277,7 @@ class Fetcher:
     )
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         deadline = time.monotonic() + MAX_RESPONSE_SECONDS
+        host = urlsplit(url).netloc  # the real host, before any relay rewrite
         kwargs["headers"] = dict(kwargs.get("headers") or {})
         url, kwargs["headers"] = self._proxied(method, url, kwargs["headers"])
         request = self.client.build_request(method, url, **kwargs)
@@ -237,6 +286,7 @@ class Fetcher:
             self.requests_made += 1
             self._source_http[threading.current_thread().name][
                 _outcome(resp.status_code)] += 1
+            self._record_outcome(host, resp.status_code)
         buf = bytearray()
         try:
             for chunk in resp.iter_bytes():
@@ -261,6 +311,7 @@ class Fetcher:
 
     def get(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
             check_robots: bool = True, **kwargs) -> httpx.Response:
+        self._guard(url)
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
@@ -269,6 +320,7 @@ class Fetcher:
 
     def head(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
              check_robots: bool = True, **kwargs) -> httpx.Response:
+        self._guard(url)
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
@@ -277,6 +329,7 @@ class Fetcher:
 
     def post(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
              check_robots: bool = True, **kwargs) -> httpx.Response:
+        self._guard(url)
         if check_robots and not self.allowed(url, user_agent):
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)

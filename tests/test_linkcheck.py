@@ -26,6 +26,9 @@ class FakeFetcher:
     def get(self, url, **kw):
         return self._resolve(url)
 
+    def tripped(self, url):
+        return False
+
 
 def _event(source, sid, url):
     return Event(
@@ -47,7 +50,7 @@ def _backdate_strike(conn, url, hours=25):
 
 def test_single_404_is_one_strike_not_dead():
     conn = connect(":memory:")
-    upsert_event(conn, _event("kulturdaten", "1", "https://x.example/gone"))
+    upsert_event(conn, _event("tip_berlin", "1", "https://x.example/gone"))
     stats = check_links(conn, FakeFetcher({"https://x.example/gone": 404}), "berlin")
     assert stats["strikes"] == 1 and stats["killed"] == 0
     assert conn.execute("SELECT link_dead_at FROM events").fetchone()[0] is None
@@ -55,7 +58,7 @@ def test_single_404_is_one_strike_not_dead():
 
 def test_second_404_after_gap_kills():
     conn = connect(":memory:")
-    upsert_event(conn, _event("kulturdaten", "1", "https://x.example/gone"))
+    upsert_event(conn, _event("tip_berlin", "1", "https://x.example/gone"))
     fetcher = FakeFetcher({"https://x.example/gone": 404})
     check_links(conn, fetcher, "berlin")
     _backdate_strike(conn, "https://x.example/gone")
@@ -66,7 +69,7 @@ def test_second_404_after_gap_kills():
 
 def test_second_404_too_soon_does_not_kill():
     conn = connect(":memory:")
-    upsert_event(conn, _event("kulturdaten", "1", "https://x.example/gone"))
+    upsert_event(conn, _event("tip_berlin", "1", "https://x.example/gone"))
     fetcher = FakeFetcher({"https://x.example/gone": 404})
     check_links(conn, fetcher, "berlin")
     # force a recheck without backdating the strike (gap < 20h)
@@ -89,7 +92,7 @@ def test_403_and_errors_are_inconclusive():
 
 def test_alive_resets_strikes():
     conn = connect(":memory:")
-    upsert_event(conn, _event("kulturdaten", "1", "https://x.example/back"))
+    upsert_event(conn, _event("tip_berlin", "1", "https://x.example/back"))
     check_links(conn, FakeFetcher({"https://x.example/back": 404}), "berlin")
     conn.execute("UPDATE link_checks SET last_checked_at='2000-01-01T00:00:00Z'")
     check_links(conn, FakeFetcher({"https://x.example/back": 200}), "berlin")
@@ -105,7 +108,7 @@ def test_ra_links_never_checked():
 
 def test_dead_head_promotes_live_member():
     conn = connect(":memory:")
-    head = _event("kulturdaten", "1", "https://x.example/gone")
+    head = _event("tip_berlin", "1", "https://x.example/gone")
     member = _event("rausgegangen", "2", "https://alive.example/event")
     upsert_event(conn, head)
     upsert_event(conn, member)
@@ -126,8 +129,8 @@ def test_dead_events_excluded_from_export(tmp_path):
     import json
 
     conn = connect(":memory:")
-    upsert_event(conn, _event("kulturdaten", "1", "https://x.example/gone"))
-    upsert_event(conn, _event("kulturdaten", "2", "https://x.example/alive"))
+    upsert_event(conn, _event("tip_berlin", "1", "https://x.example/gone"))
+    upsert_event(conn, _event("tip_berlin", "2", "https://x.example/alive"))
     conn.execute("UPDATE events SET link_dead_at='2026-01-01T00:00:00Z' "
                  "WHERE source_url LIKE '%gone'")
     # export window is relative to today; use far-future occurrence via direct query check
@@ -138,3 +141,10 @@ def test_dead_events_excluded_from_export(tmp_path):
     export_city(conn, "berlin", tmp_path)
     data = json.loads((tmp_path / "berlin" / "index.json").read_text())
     assert all("gone" not in e["source_url"] for e in data["events"])
+
+def test_listing_sources_are_not_probed():
+    """kulturdaten re-pages its whole listing every run — that is the liveness check."""
+    conn = connect(":memory:")
+    upsert_event(conn, _event("kulturdaten", "1", "https://www.berlin.de/land/kalender/?detail=1"))
+    stats = check_links(conn, FakeFetcher({}), "berlin")
+    assert stats["due"] == 0 and stats["checked"] == 0

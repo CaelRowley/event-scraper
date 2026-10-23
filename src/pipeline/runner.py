@@ -1,10 +1,16 @@
-"""Pipeline orchestration: adapters → normalise → store → dedup → categorise → LLM → export.
+"""Pipeline orchestration: adapters → normalise → categorise → store → dedup → enrich → export.
 
 Adapters run concurrently, one worker thread per source, each on its own SQLite
 connection (WAL). Politeness is unaffected: the shared Fetcher serializes same-domain
 requests via per-domain locks, and every source hits a distinct domain anyway.
 Invariant for all workers: no write transaction may span an HTTP request — commit
 per event/iteration, or the WAL write lock starves every other thread.
+
+After dedup, the enrichment phases (image scan, link and image checks, stock
+photos, sanity) are best-effort and incremental: each picks up next run whatever
+it skipped. So none of them may cost the run its export — a phase that raises is
+logged and reported, and once the run passes ENRICH_DEADLINE the remaining phases
+are skipped. A stale feed is the one outcome worse than a slightly less enriched one.
 """
 
 from __future__ import annotations
@@ -12,14 +18,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from . import config as cfg
-from .categorise.llm import run_llm_tier
-from .categorise.rules import classify, classify_best_effort
-from .db import connect, queue_for_llm, reconcile_occurrences, set_category, snapshot, upsert_event
+from .categorise.rules import classify_best_effort
+from .db import connect, reconcile_occurrences, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
 from .retention import prune_past
@@ -33,18 +39,22 @@ from .venues import VenueIndex, seed_venues
 
 log = logging.getLogger(__name__)
 
+# Minutes after the run starts beyond which no further enrichment phase begins.
+# The job's hard limit is 75; a full run's scrape takes ~15. Past this point the
+# run goes straight to export, so a slow host can delay the feed but not kill it.
+ENRICH_DEADLINE_MINUTES = float(os.environ.get("PIPELINE_ENRICH_DEADLINE_MIN", "45"))
+
 
 @dataclass
 class AdapterResult:
     slug: str
     count: int = 0
     tier_counts: Counter = field(default_factory=Counter)
-    descriptions: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
 
 def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: str,
-                 fetcher: Fetcher, venue_index: VenueIndex, ai_enabled: bool,
+                 fetcher: Fetcher, venue_index: VenueIndex,
                  limit: int | None) -> AdapterResult:
     threading.current_thread().name = slug
     res = AdapterResult(slug)
@@ -58,8 +68,7 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
             if ev is None:
                 continue
             ev.venue_id, venue_prior = venue_index.resolve(ev.venue_name)
-            classifier = classify if ai_enabled else classify_best_effort
-            cls = classifier(
+            cls = classify_best_effort(
                 ev,
                 source_prior=adapter.category_prior,
                 mapped_category=adapter.map_category(raw),
@@ -73,24 +82,17 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
             if changed:
                 snapshot(conn, ev.source, ev.source_event_id,
                          {**raw.payload, "description": (ev.description or "")[:1500]})
-            current_tier = conn.execute(
-                "SELECT category_tier FROM events WHERE id=?", (eid,)
-            ).fetchone()["category_tier"]
-            if cls is not None:
-                # never clobber an LLM verdict on an unchanged event
+            if cls is None:
+                res.tier_counts["unclassified"] += 1  # zero signal — stays "other"
+            else:
+                current_tier = conn.execute(
+                    "SELECT category_tier FROM events WHERE id=?", (eid,)
+                ).fetchone()["category_tier"]
+                # Verdicts from the retired AI tier beat a rules guess; keep them
+                # until the event itself changes (retention clears them within weeks).
                 if changed or current_tier != "llm":
                     set_category(conn, eid, cls.category, cls.tier, cls.confidence, cls.tags)
                     res.tier_counts[cls.tier] += 1
-                if cls.tier == "keyword_multi" and current_tier != "llm":
-                    # best-effort guess — queue so the AI tier upgrades it later
-                    queue_for_llm(conn, eid)
-                    if ev.description:
-                        res.descriptions[eid] = ev.description
-            elif changed or current_tier in ("fallback_other", "keyword_multi"):
-                queue_for_llm(conn, eid)
-                if ev.description:
-                    res.descriptions[eid] = ev.description
-                res.tier_counts["queued_llm"] += 1
             conn.commit()  # per event — see module invariant
         # A source refresh is authoritative for every event it returned. Reconcile
         # only after clean completion: a mid-stream adapter failure must never
@@ -110,13 +112,31 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
     return res
 
 
+def _phase(name: str, fn, conn, *, deadline: float, phase_errors: dict) -> dict:
+    """Run one enrichment phase without letting it take the export down with it."""
+    if time.monotonic() > deadline:
+        log.warning("phase %s skipped: past the %.0f-minute enrichment deadline",
+                    name, ENRICH_DEADLINE_MINUTES)
+        phase_errors[name] = "skipped: deadline"
+        return {"skipped": "deadline"}
+    started = time.monotonic()
+    try:
+        stats = fn()
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 — enrichment is best-effort, the export is not
+        conn.rollback()
+        log.error("phase %s failed: %s", name, exc, exc_info=True)
+        phase_errors[name] = f"{type(exc).__name__}: {exc}"
+        return {"error": phase_errors[name]}
+    stats = dict(stats or {})
+    stats["seconds"] = round(time.monotonic() - started, 1)
+    return stats
+
+
 def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None = None,
-        limit: int | None = None, no_llm: bool = False, llm_poll: int = 1200,
-        db_path: str | None = None) -> dict:
-    # Two categorisation modes: "ai" when a key is present (and not opted out),
-    # "rules" otherwise. Rules mode classifies as best it can (keyword_multi tier)
-    # and still queues those events, so adding ANTHROPIC_API_KEY later upgrades them.
-    ai_enabled = not no_llm and bool(os.environ.get("ANTHROPIC_API_KEY"))
+        limit: int | None = None, db_path: str | None = None) -> dict:
+    started = time.monotonic()
+    deadline = started + ENRICH_DEADLINE_MINUTES * 60
     city = cfg.CITIES[city_slug]
     main_db = str(db_path or cfg.DB_PATH)
     conn = connect(main_db)
@@ -128,14 +148,13 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
 
     tier_counts: Counter = Counter()
     source_counts: Counter = Counter()
-    descriptions: dict[str, str] = {}
     errors: dict[str, str] = {}
+    phase_errors: dict[str, str] = {}
 
     max_workers = min(len(tasks) or 1, int(os.environ.get("PIPELINE_MAX_WORKERS", "12")))
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="adapter") as ex:
         futures = [
-            ex.submit(_run_adapter, slug, acls, city, main_db,
-                      fetcher, venue_index, ai_enabled, limit)
+            ex.submit(_run_adapter, slug, acls, city, main_db, fetcher, venue_index, limit)
             for slug, acls in tasks
         ]
         for fut in as_completed(futures):
@@ -144,47 +163,38 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
             # how four blocked sources stayed invisible in a green run.
             source_counts[r.slug] = r.count
             tier_counts.update(r.tier_counts)
-            descriptions.update(r.descriptions)
             if r.error:
                 errors[r.slug] = r.error
+    scrape_seconds = round(time.monotonic() - started, 1)
 
     dedup_stats = run_dedup(conn, city.slug)
     conn.commit()
 
-    # These phases all write to SQLite. Running them concurrently saved some
-    # wall-clock time but still produced intermittent WAL lock failures in CI.
-    # Their HTTP probes are budgeted already, so favor a deterministic single
-    # writer here; adapter fetching above remains concurrent.
-    image_stats = backfill_images(conn, fetcher, city.slug)
-    conn.commit()
-    link_stats = check_links(conn, fetcher, city.slug)
-    conn.commit()
-    image_check_stats = check_images(conn, fetcher, city.slug)
-    conn.commit()
+    def phase(name, fn):
+        return _phase(name, fn, conn, deadline=deadline, phase_errors=phase_errors)
 
+    # Each phase writes to SQLite from this thread only. Their HTTP fans out across
+    # hosts inside the phase (probe.py), which is where the time was; running the
+    # phases themselves concurrently produced intermittent WAL lock failures in CI.
+    image_stats = phase("images", lambda: backfill_images(conn, fetcher, city.slug))
+    link_stats = phase("links", lambda: check_links(conn, fetcher, city.slug))
+    image_check_stats = phase("image_checks", lambda: check_images(conn, fetcher, city.slug))
     # Last of the image phases, deliberately: it fills only what both the source
     # and the page scan failed to provide, and `check_images` above can null an
     # image_url it finds dead — which creates work for this.
-    stock_stats = backfill_stock_photos(conn, city.slug, fetcher=fetcher)
-    conn.commit()
-
-    sanity_stats = run_sanity_checks(conn, city.slug)
-    conn.commit()
-
-    llm_stats = {}
-    if ai_enabled:
-        llm_stats = run_llm_tier(conn, descriptions, poll_seconds=llm_poll)
-        conn.commit()
+    stock_stats = phase("stock_photos",
+                        lambda: backfill_stock_photos(conn, city.slug, fetcher=fetcher))
+    sanity_stats = phase("sanity", lambda: run_sanity_checks(conn, city.slug))
 
     export_stats = export_city(conn, city.slug, cfg.PUBLIC_DIR)
 
     # After the export, deliberately: the window is today-forward, so nothing
     # pruned here could have belonged in the feed we just wrote — and if this
-    # ever gets its cutoff wrong, it cannot take the feed down with it.
-    retention_stats = prune_past(conn, city.slug)
-    conn.commit()
+    # ever gets its cutoff wrong, it cannot take the feed down with it. No
+    # deadline: it is a few local DELETEs, and skipping it lets the DB grow.
+    retention_stats = _phase("retention", lambda: prune_past(conn, city.slug), conn,
+                             deadline=float("inf"), phase_errors=phase_errors)
 
-    queue_size = conn.execute("SELECT COUNT(*) AS n FROM llm_queue").fetchone()["n"]
     # A source can fail without raising: adapters log an HTTP block and yield
     # nothing, so `errors` stays empty and the run looks healthy. Zero yield is not
     # the signal either — sitemap sources legitimately return nothing on a day with
@@ -201,11 +211,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         log.error("sources refused every request: %s", ", ".join(blocked_sources))
 
     telemetry = {
-        "categorisation_mode": "ai" if ai_enabled else "rules",
         "sources": dict(source_counts),
         "errors": errors,
+        "phase_errors": phase_errors,
         "source_http": source_http,
         "blocked_sources": blocked_sources,
+        "tripped_hosts": fetcher.tripped_hosts(),
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,
@@ -213,11 +224,10 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "links": link_stats,
         "image_checks": image_check_stats,
         "sanity": sanity_stats,
-        "llm": llm_stats,
-        "llm_queue_remaining": queue_size,
         "export": export_stats,
         "retention": retention_stats,
         "http_requests": fetcher.requests_made,
+        "seconds": {"scrape": scrape_seconds, "total": round(time.monotonic() - started, 1)},
     }
     log.info("run telemetry: %s", telemetry)
     fetcher.close()

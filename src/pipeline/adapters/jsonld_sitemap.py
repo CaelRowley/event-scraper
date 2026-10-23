@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 from ..db import ledger_get, ledger_put
 from ..extract.jsonld import events_from_html
-from ..fetch import RateSpec
+from ..fetch import RateSpec, is_refusal
 from ..models import RawEvent
 from .base import SourceAdapter
 from .jsonld_common import jsonld_to_raw
@@ -61,6 +61,10 @@ class JsonLdSitemapAdapter(SourceAdapter):
         for url, lastmod in targets[: self.page_budget]:
             try:
                 resp = self.get(url)
+                if is_refusal(resp.status_code):
+                    # Not ledgered: the ledger means "seen at this lastmod", and a
+                    # page we were refused has not been seen — retry it next run.
+                    continue
                 if resp.status_code != 200:
                     ledger_put(self.conn, self.slug, url, lastmod=lastmod, status=resp.status_code)
                     continue

@@ -3,7 +3,7 @@
 Nothing used to remove anything. The export only ever looks at `today .. today +
 EXPORT_WINDOW_DAYS`, so a concert from last March stopped being published the
 morning after it happened — and then stayed in the database forever, with its
-occurrences, its raw snapshot, its alias trail and its unresolved LLM queue row.
+occurrences, its raw snapshot and its alias trail.
 The published feed prunes itself; the database it comes from did not.
 
 An event is over when its *last* occurrence is behind the cutoff. Last, not
@@ -12,7 +12,7 @@ them says nothing about whether it is finished.
 
 What goes with it:
 
-  * `occurrences`, `llm_queue`, `merged_sources` — meaningless without the event
+  * `occurrences`, `merged_sources` — meaningless without the event
   * `event_aliases` on either side, since neither a dead alias nor a dead
     canonical resolves to anything
   * `raw_snapshots`, matched on `(source_slug, source_event_id)` because that is
@@ -81,7 +81,6 @@ def prune_past(conn, city: str, *, keep_days: int = RETAIN_PAST_DAYS,
         occurrences += conn.execute(
             f"DELETE FROM occurrences WHERE event_id IN ({marks})", batch
         ).rowcount
-        conn.execute(f"DELETE FROM llm_queue WHERE event_id IN ({marks})", batch)
         conn.execute(f"DELETE FROM merged_sources WHERE canonical_id IN ({marks})", batch)
         # Both sides: a pruned event is neither a useful alias nor a useful target.
         conn.execute(f"DELETE FROM event_aliases WHERE canonical_id IN ({marks})", batch)

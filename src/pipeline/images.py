@@ -13,21 +13,28 @@ import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlsplit
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from .db import ledger_get, ledger_put
 from .extract.jsonld import events_from_html
-from .fetch import RateSpec
+from .fetch import HostBlockedError, RateSpec
+from .probe import fan_out, select
 
 log = logging.getLogger(__name__)
 
-SCAN_BUDGET = 120
+# Pages scanned per run, and the most any one host may take of that. Hosts run in
+# parallel (probe.py), so a run costs about PER_HOST × that host's spacing rather
+# than the sum. berlin.de's calendar — where kulturdaten events now link — is the
+# big one: ~900 pages, so the cap is what keeps it from setting the phase length.
+SCAN_BUDGET = 300
+PER_HOST = 100
 SCAN_RETRY_DAYS = 7
 RATE = RateSpec(min_interval=1.0, jitter=(0.3, 1.0))
 
 # pages that are not scannable HTML or are known to block us
 SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin", "app.ticketmaster.com")
-_BAD_HINTS = ("logo", "favicon", "placeholder", "default-share", ".svg")
+_BAD_HINTS = ("logo", "favicon", "placeholder", "default-share", ".svg", "qrcode",
+              "/icon/", "/icons/", "piktogramm")
 
 
 def find_image(html: str, base_url: str) -> str | None:
@@ -72,7 +79,9 @@ def _int(value) -> int | None:
 def _content_image(tree: HTMLParser, base_url: str) -> str | None:
     """Largest plausible <img> in the most article-like scope. Conservative:
     size attributes below 200×150 are rejected, logo-ish names already filtered."""
-    for scope in ("article img", "main img", "figure img"):
+    # [role=main] last: berlin.de's calendar (kulturdaten's event pages) has no
+    # article/main/figure element, only an ARIA landmark around the photo.
+    for scope in ("article img", "main img", "figure img", '[role="main"] img'):
         candidates: list[tuple[int, int, str]] = []
         for img in tree.css(scope):
             src = (img.attributes.get("src") or img.attributes.get("data-src") or "").strip()
@@ -127,6 +136,26 @@ def scan_is_due(ledger_row, now: datetime | None = None) -> bool:
     return checked_at <= current - timedelta(days=SCAN_RETRY_DAYS)
 
 
+def _scan(fetcher, url: str) -> tuple[int | None, str | None]:
+    """(ledger status, image) for one page. Runs on a probe worker — no SQLite.
+
+    Status is the HTTP code, -1 for a robots refusal, -2 for a failed fetch, and
+    None when the host's circuit breaker tripped (nothing to record).
+    """
+    try:
+        if not fetcher.allowed(url):
+            return -1, None
+        resp = fetcher.get(url, rate=RATE)
+        if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "html"):
+            return resp.status_code, None
+        return resp.status_code, find_image(resp.text, str(resp.url))
+    except HostBlockedError:
+        return None, None
+    except Exception as exc:  # noqa: BLE001 — a dead organiser site must not kill the run
+        log.debug("imgscan %s failed: %s", url, exc)
+        return -2, None
+
+
 def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict:
     """Scan source pages of imageless feed-window events, soonest first.
     A found image is applied to every event sharing the URL; misses retry weekly."""
@@ -145,43 +174,26 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
 
     stats = {"candidates": len(rows), "scanned": 0, "found": 0,
              "events_updated": propagated}
-    for row in rows:
-        if stats["scanned"] >= budget:
-            break
-        url = row["source_url"]
-        host = urlsplit(url).netloc
-        if any(host.endswith(s) for s in SKIP_HOSTS):
-            continue
-        if not scan_is_due(ledger_get(conn, "imgscan", url)):
-            continue
-        # Commit after every write so no write transaction stays open across the
-        # following HTTP request (adapter workers may still be finishing).
-        try:
-            if not fetcher.allowed(url):
-                ledger_put(conn, "imgscan", url, status=-1)
-                conn.commit()
-                continue
-            resp = fetcher.get(url, rate=RATE)
+    due = [
+        r["source_url"] for r in rows
+        if not any(urlsplit(r["source_url"]).netloc.endswith(h) for h in SKIP_HOSTS)
+        and scan_is_due(ledger_get(conn, "imgscan", r["source_url"]))
+    ]
+    batch = select(due, budget=budget, per_host=PER_HOST)
+    for url, (status, image) in fan_out(batch, lambda u: _scan(fetcher, u), fetcher=fetcher):
+        if status is None:
+            continue  # host gave up on mid-run — not a verdict on the page; retry next run
+        ledger_put(conn, "imgscan", url, status=status)
+        if status != -1:  # a robots refusal costs no request
             stats["scanned"] += 1
-            ledger_put(conn, "imgscan", url, status=resp.status_code)
-            conn.commit()
-            if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "html"):
-                continue
-            image = find_image(resp.text, str(resp.url))
-        except Exception as exc:  # noqa: BLE001 — a dead organiser site must not kill the run
-            log.debug("imgscan %s failed: %s", url, exc)
-            ledger_put(conn, "imgscan", url, status=-2)
-            conn.commit()
-            stats["scanned"] += 1
-            continue
         if image:
             cur = conn.execute(
                 "UPDATE events SET image_url=? WHERE source_url=? "
                 "AND (image_url IS NULL OR image_url='')",
                 (image, url),
             )
-            conn.commit()
             stats["found"] += 1
             stats["events_updated"] += cur.rowcount
+        conn.commit()  # per page — no write transaction spans the next result
     log.info("image backfill: %s", stats)
     return stats

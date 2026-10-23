@@ -196,3 +196,48 @@ def test_backfill_goes_through_the_pipeline_fetcher_when_given_one():
     assert route.called
     assert fetcher.requests_made >= 1, "the lookup must be counted by the shared fetcher"
     assert route.calls[0].request.headers["User-Agent"].startswith("events-pipeline")
+
+
+def test_an_exhausted_pool_spreads_repeats_instead_of_reusing_the_top_hit():
+    from pipeline.stock_photos import pick
+    ranked = [(f"https://upload.wikimedia.org/{i}.jpg", None) for i in range(10)]
+    claimed = {url for url, _ in ranked}
+    picks = {pick(ranked, claimed, key=f"event-{n}")[0] for n in range(50)}
+    assert len(picks) > 5, f"repeats collapsed onto {len(picks)} photo(s)"
+    assert pick(ranked, claimed, key="same") == pick(ranked, claimed, key="same")
+
+
+def test_duplicates_from_an_older_pool_are_released_once():
+    from pipeline import stock_photos
+    conn = connect(":memory:")
+    for i in range(3):
+        upsert_event(conn, _ev(str(i), f"Event {i}"))
+    conn.execute("UPDATE events SET stock_image_url='https://upload.wikimedia.org/same.jpg', "
+                 "stock_attempted_at='2026-01-01T00:00:00Z'")
+    conn.commit()
+
+    assert stock_photos._release_duplicates(conn) == 2
+    kept = conn.execute("SELECT COUNT(*) FROM events WHERE stock_image_url IS NOT NULL").fetchone()[0]
+    assert kept == 1
+    # second call is a no-op: the pool version is recorded
+    conn.execute("UPDATE events SET stock_image_url='https://upload.wikimedia.org/same.jpg'")
+    assert stock_photos._release_duplicates(conn) == 0
+
+
+@respx.mock
+def test_past_events_are_neither_looked_up_nor_hold_a_photo():
+    route = respx.get(COMMONS_API).mock(return_value=_reply([_commons_page(0, "only.jpg")]))
+    conn = connect(":memory:")
+    past = _ev("old", "Old Event")
+    for o in past.occurrences:
+        o.starts_at_utc, o.nightlife_date = "2020-01-01T20:00:00Z", "2020-01-01"
+    upsert_event(conn, past)
+    conn.execute("UPDATE events SET stock_image_url='https://upload.wikimedia.org/only.jpg'")
+    upsert_event(conn, _ev("new", "New Event"))
+    conn.commit()
+
+    stats = backfill_stock_photos(conn, "berlin")
+    assert stats["considered"] == 1
+    assert route.called
+    new = conn.execute("SELECT stock_image_url FROM events WHERE source_event_id='new'").fetchone()
+    assert new["stock_image_url"] == "https://upload.wikimedia.org/only.jpg"

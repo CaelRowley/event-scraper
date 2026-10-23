@@ -76,9 +76,6 @@ CREATE TABLE IF NOT EXISTS event_aliases(
   noted_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_event_aliases_canonical ON event_aliases(canonical_id);
-CREATE TABLE IF NOT EXISTS llm_queue(
-  event_id TEXT PRIMARY KEY, queued_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS dedup_near_misses(
   id INTEGER PRIMARY KEY, event_a TEXT NOT NULL, event_b TEXT NOT NULL,
   title_score REAL, venue_score REAL, noted_at TEXT NOT NULL
@@ -107,6 +104,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # The AI categorisation tier is retired; its queue has nothing left to feed.
+    conn.execute("DROP TABLE IF EXISTS llm_queue")
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     if "description" not in cols:
         # public description for open-licensed sources only (CC-BY kulturdaten etc.)
@@ -164,12 +163,22 @@ def snapshot(conn, source: str, source_event_id: str, payload: dict) -> None:
 
 # --- events / occurrences ----------------------------------------------------
 
+def _only_url_changed(ev: Event, row) -> bool:
+    """Whether the stored hash matches this event with its previous source_url."""
+    new_url = ev.source_url
+    try:
+        ev.source_url = row["source_url"]
+        return ev.content_hash() == row["content_hash"]
+    finally:
+        ev.source_url = new_url
+
+
 def upsert_event(conn, ev: Event) -> tuple[str, bool]:
     """Insert or update an event. Returns (event_id, changed) — changed gates downstream work."""
     now = now_iso()
     row = conn.execute(
-        "SELECT id, content_hash, category, category_tier, category_confidence FROM events "
-        "WHERE source_slug=? AND source_event_id=?",
+        "SELECT id, content_hash, source_url, category, category_tier, category_confidence "
+        "FROM events WHERE source_slug=? AND source_event_id=?",
         (ev.source, ev.source_event_id),
     ).fetchone()
     new_hash = ev.content_hash()
@@ -196,6 +205,12 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
         ev.id = row["id"]
         changed = row["content_hash"] != new_hash
         conn.execute("UPDATE events SET last_seen_at=? WHERE id=?", (now, ev.id))
+        if changed and _only_url_changed(ev, row):
+            # A better link alone is not a content change: no snapshot, and no
+            # re-classification that could replace a kept category.
+            conn.execute("UPDATE events SET source_url=?, content_hash=? WHERE id=?",
+                         (ev.source_url, new_hash, ev.id))
+            changed = False
         if changed:
             conn.execute(
                 """UPDATE events SET title=?, source_url=?, is_range=?, range_start=?, range_end=?,
@@ -246,12 +261,6 @@ def set_category(conn, eid: str, category: str, tier: str, confidence: float, ta
     conn.execute(
         "UPDATE events SET category=?, category_tier=?, category_confidence=?, tags_json=? WHERE id=?",
         (category, tier, confidence, json.dumps(tags), eid),
-    )
-
-
-def queue_for_llm(conn, eid: str) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO llm_queue(event_id, queued_at) VALUES(?,?)", (eid, now_iso())
     )
 
 

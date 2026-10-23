@@ -1,4 +1,4 @@
-"""CLI: python -m pipeline run --city berlin --mode full|delta [--source ra] [--limit N] [--no-llm]"""
+"""CLI: python -m pipeline run --city berlin --mode full|delta [--source ra] [--limit N]"""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--mode", choices=["full", "delta"], default="full")
     p_run.add_argument("--source", action="append", help="restrict to source slug(s)")
     p_run.add_argument("--limit", type=int, help="max events per source (smoke tests)")
-    p_run.add_argument("--no-llm", action="store_true")
-    p_run.add_argument("--llm-poll", type=int, default=1200, help="seconds to wait for the batch")
 
     p_export = sub.add_parser("export", help="re-export static JSON from the DB only")
     p_export.add_argument("--city", default="berlin")
@@ -54,10 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         from .runner import run
 
-        telemetry = run(
-            args.city, mode=args.mode, only=args.source, limit=args.limit,
-            no_llm=args.no_llm, llm_poll=args.llm_poll,
-        )
+        telemetry = run(args.city, mode=args.mode, only=args.source, limit=args.limit)
         print(json.dumps(telemetry, indent=2))
         return 0
 

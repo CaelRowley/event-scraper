@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from datetime import date, timedelta
 from urllib.parse import urljoin
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from ..db import ledger_get, ledger_put
 from ..extract.jsonld import events_from_html

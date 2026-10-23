@@ -1,6 +1,5 @@
-from pipeline.categorise.llm import OUTPUT_SCHEMA
 from pipeline.categorise.rules import FAMILY_PRIORITY, classify, classify_best_effort
-from pipeline.categorise.taxonomy import CATEGORIES, map_ticketmaster
+from pipeline.categorise.taxonomy import map_ticketmaster
 from pipeline.models import Event, Price
 
 
@@ -38,12 +37,12 @@ def test_single_keyword_family_fires():
     assert c.category == "art_exhibitions" and c.tier == "keyword"
 
 
-def test_multi_family_goes_to_llm():
+def test_multi_family_is_left_to_best_effort():
     # both club (party) and live music (konzert) keywords → ambiguous → None
     assert classify(_event("Konzert + Aftershow-Party")) is None
 
 
-def test_no_signal_goes_to_llm():
+def test_no_signal_is_left_to_best_effort():
     assert classify(_event("Zusammen am Mittwoch")) is None
 
 
@@ -59,11 +58,7 @@ def test_ticketmaster_music_splits_on_genre():
     assert map_ticketmaster("Sports", None) == "sports_fitness"
 
 
-def test_llm_schema_enums_match_taxonomy():
-    assert OUTPUT_SCHEMA["properties"]["category"]["enum"] == CATEGORIES
-
-
-# --- rules-only mode (no AI key) -------------------------------------------------
+# --- best effort: what the pipeline runs -----------------------------------------
 
 def test_best_effort_agrees_with_classify_when_unambiguous():
     ev = _event("Vernissage: Neue Malerei aus Mitte")
@@ -72,8 +67,8 @@ def test_best_effort_agrees_with_classify_when_unambiguous():
 
 def test_best_effort_resolves_multi_match():
     ev = _event("Konzert + Aftershow-Party")
-    assert classify(ev) is None  # AI mode defers this to the LLM
-    cls = classify_best_effort(ev)  # rules mode takes its best shot
+    assert classify(ev) is None  # strict rules see it as ambiguous
+    cls = classify_best_effort(ev)  # best effort takes its best shot
     assert cls is not None and cls.tier == "keyword_multi" and cls.confidence == 0.5
     assert cls.category in ("live_music", "club_nightlife")
 

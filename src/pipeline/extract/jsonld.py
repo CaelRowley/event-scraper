@@ -6,7 +6,7 @@ import json
 import logging
 
 import chompjs
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 log = logging.getLogger(__name__)
 

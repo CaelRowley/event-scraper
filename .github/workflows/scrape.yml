@@ -6,7 +6,7 @@ on:
     # window; the delta run exists so an event announced with a few days' notice
     # is not invisible for up to 24 hours. Keep the cron strings byte-identical
     # to the MODE expression below — that is what distinguishes them.
-    - cron: "0 3 * * *"    # full: every source, crawl + dedup + Haiku batch + export (~05:00 Berlin)
+    - cron: "0 3 * * *"    # full: every source, crawl + dedup + enrich + export (~05:00 Berlin)
     - cron: "0 13 * * *"   # delta: cheap_delta sources only (~15:00 Berlin)
   workflow_dispatch:
     inputs:
@@ -28,22 +28,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # Installs exactly what uv.lock says. `pip install -e .` resolved fresh on
+      # every run, so selectolax 1.0 shipping (2026-10-03) broke every scrape for
+      # three weeks without a line of this repo changing. Upgrades now arrive as
+      # Dependabot PRs, tested before they can reach this job.
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.12"   # pinned: parsing stack tested here
-          cache: pip
+          activate-environment: true
+          enable-cache: true
 
-      - run: pip install -e .
+      - run: uv sync --frozen
 
       # data/ (SQLite DB + HTTP cache) persists between runs via the cache, NOT git —
-      # the delta ledgers, image-scan ledger, detail caches, and pending LLM batch id
-      # all live there. A cache miss costs one slow cold run and nothing else:
-      # event ids are derived from the source listing (ids.py), so a rebuilt
-      # database reproduces them exactly.
+      # the delta ledgers, image-scan ledger and detail caches all live there.
+      # A cache miss costs one slow cold run and nothing else: event ids are
+      # derived from the source listing (ids.py), so a rebuilt database
+      # reproduces them exactly.
       - name: Restore data
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data
           key: pipeline-data-${{ github.run_id }}
@@ -51,9 +56,8 @@ jobs:
 
       - name: Run pipeline
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Optional relay for the four sources that refuse this runner's IP.
-          # Unset, they stay blocked and the freshness gate says so.
+          # Unset, they stay blocked and the source health step says so.
           FETCH_PROXY_URL: ${{ secrets.FETCH_PROXY_URL }}
           FETCH_PROXY_TOKEN: ${{ secrets.FETCH_PROXY_TOKEN }}
           # Accept the original documented name and the TICKET_MASTER_KEY name
@@ -70,39 +74,31 @@ jobs:
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
         run: |
           set -o pipefail
-          # --llm-poll 300: wait ≤5 min for the Haiku batch; an unfinished batch is
-          # collected at the start of the next run (pending_batch_id in the kv table)
-          ARGS="--city berlin --mode $MODE --llm-poll 300"
+          ARGS="--city berlin --mode $MODE"
           if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
             echo "::notice::DEV MODE — capping at $SCRAPE_LIMIT events/source; sync is upsert-only"
             ARGS="$ARGS --limit $SCRAPE_LIMIT"
           fi
           python -m pipeline run $ARGS | tee telemetry.json
 
-      - name: Freshness / yield alert
+      # Hard gate: only what would make the feed itself wrong stops it publishing.
+      # Everything else is reported by the health check after publish — a refused
+      # source or a failed enrichment phase used to block the whole feed, which is
+      # how three sources that could contribute nothing kept it stale.
+      - name: Freshness gate
         run: |
           python - <<'EOF'
           import json, sys
           t = json.load(open("telemetry.json"))
-          live = {k: v for k, v in t["sources"].items() if v}
           total = sum(t["sources"].values())
-          print(f"ingested {total} events from {len(live)} of {len(t['sources'])} sources")
-          print(f"errors: {t['errors']}")
-          print(f"blocked: {t.get('blocked_sources', [])}")
+          failed, ran = len(t["errors"]), len(t["sources"])
+          print(f"ingested {total} events; {failed} of {ran} sources failed")
           if total == 0:
               sys.exit("ALERT: zero events ingested — every source failed or yielded nothing")
-          # Absolute AND proportional: three dead sources is bad in any run, but a
-          # delta run only has three to begin with, so "3 failed" there means
-          # everything failed and the absolute rule alone would never fire early.
-          failed, ran = len(t["errors"]), len(t["sources"])
-          if failed and (failed >= 3 or failed * 2 >= ran):
+          # A majority failing smells like something systemic (network, a bad
+          # deploy) rather than a source or two having a bad day.
+          if failed * 2 > ran:
               sys.exit(f"ALERT: {failed} of {ran} sources failed: {list(t['errors'])}")
-          # A source that logged an HTTP block and yielded nothing never reaches
-          # `errors` — adapters contain those and return empty. Zero yield alone is
-          # not the signal (a sitemap source with no new pages is healthy); every
-          # request being refused is.
-          if t.get("blocked_sources"):
-              sys.exit(f"ALERT: refused every request: {t['blocked_sources']}")
           EOF
 
       # save only after the freshness gate: a failed or zero-yield run must not
@@ -114,7 +110,7 @@ jobs:
             echo "::notice::http_cache.db over 250MB — dropping it (self-heals next run)"
             rm -f data/http_cache.db*
           fi
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@v6
         with:
           path: data
           key: pipeline-data-${{ github.run_id }}
@@ -126,6 +122,7 @@ jobs:
       # diff: content-addressed names mean a steady-state run ships only the
       # events that actually changed, plus feed and manifest.
       - name: Publish feed to R2
+        id: publish
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -143,11 +140,40 @@ jobs:
           fi
           python -m pipeline publish $ARGS
 
-      # A failed run is invisible to users — they keep seeing yesterday's feed,
-      # because the last manifest still resolves. Say so loudly here; the client
-      # also surfaces `generated_at`, so staleness shows in the UI too.
-      - name: Report failure
-        if: failure()
+      # After publish, so it can fail the run without holding the feed back.
+      # Red here means "look at this", not "the feed is stale".
+      - name: Source health
+        run: |
+          python - <<'EOF'
+          import json, sys
+          t = json.load(open("telemetry.json"))
+          live = {k: v for k, v in t["sources"].items() if v}
+          print(f"{len(live)} of {len(t['sources'])} sources yielded events: {t['sources']}")
+          print(f"seconds: {t.get('seconds')}")
+          problems = []
+          for slug, err in t["errors"].items():
+              problems.append(f"source {slug} failed: {err}")
+          # A source that logged an HTTP block and yielded nothing never reaches
+          # `errors` — adapters contain those and return empty. Zero yield alone is
+          # not the signal (a sitemap source with no new pages is healthy); every
+          # request being refused is.
+          for slug in t.get("blocked_sources", []):
+              problems.append(f"source {slug} refused every request")
+          for phase, err in t.get("phase_errors", {}).items():
+              problems.append(f"phase {phase}: {err}")
+          for host in t.get("tripped_hosts", []):
+              print(f"::notice::{host} refused repeatedly and was skipped for the rest of the run")
+          for p in problems:
+              print(f"::warning::{p}")
+          if problems:
+              sys.exit(f"{len(problems)} problem(s) — the feed was still published")
+          EOF
+
+      # A failed run before publish is invisible to users — they keep seeing
+      # yesterday's feed, because the last manifest still resolves. Say so loudly
+      # here; the client also surfaces `generated_at`, so staleness shows in the UI.
+      - name: Report stale feed
+        if: failure() && steps.publish.outcome != 'success'
         run: |
           echo "::error::Scrape failed — the published feed is now stale."
           echo "::error::Clients keep serving the last good manifest until this succeeds."
@@ -176,9 +202,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.12"
-      - run: pip install -e '.[dev]'
-      - run: python -m pytest -q
+          enable-cache: true
+      - run: uv sync --frozen --extra dev
+      - run: uv run --frozen pytest -q

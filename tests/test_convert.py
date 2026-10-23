@@ -66,7 +66,8 @@ def test_description_only_stored_for_open_licensed_sources():
     assert rows == {"kd": "CC-BY text", "tip": None}
 
 
-def test_source_url_change_marks_event_changed():
+def test_source_url_change_updates_link_without_marking_event_changed():
+    """A better link alone must not re-run classification or snapshot the event."""
     from pipeline.db import connect, upsert_event
 
     conn = connect(":memory:")
@@ -75,9 +76,26 @@ def test_source_url_change_marks_event_changed():
     upsert_event(conn, to_event(raw, "berlin"))
     raw.source_url = "https://venue.example/event"  # website discovered on a later run
     _, changed = upsert_event(conn, to_event(raw, "berlin"))
-    assert changed
+    assert not changed
     row = conn.execute("SELECT source_url FROM events").fetchone()
     assert row["source_url"] == "https://venue.example/event"
+    # and the stored hash caught up, so the next run is a plain no-op
+    _, changed = upsert_event(conn, to_event(raw, "berlin"))
+    assert not changed
+
+
+def test_source_url_change_with_a_real_edit_still_marks_event_changed():
+    from pipeline.db import connect, upsert_event
+
+    conn = connect(":memory:")
+    raw = RawEvent(source="kd", source_event_id="1", source_url="https://api.example/rec/1",
+                   title="A", start="2026-06-14")
+    upsert_event(conn, to_event(raw, "berlin"))
+    raw.source_url, raw.title = "https://venue.example/event", "A (sold out)"
+    _, changed = upsert_event(conn, to_event(raw, "berlin"))
+    assert changed
+    row = conn.execute("SELECT source_url, title FROM events").fetchone()
+    assert (row["source_url"], row["title"]) == ("https://venue.example/event", "A (sold out)")
 
 
 def test_content_hash_stable_and_sensitive():

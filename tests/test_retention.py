@@ -1,7 +1,7 @@
 """Finished events leave, and take their baggage with them."""
 from datetime import date, timedelta
 
-from pipeline.db import connect, upsert_event, queue_for_llm, snapshot
+from pipeline.db import connect, upsert_event, snapshot
 from pipeline.models import Event, Occurrence, Price
 from pipeline.retention import prune_past
 
@@ -55,17 +55,6 @@ def test_the_retention_margin_is_respected():
     _ev(conn, "yesterday", days=[-1])
     assert prune_past(conn, "berlin", keep_days=7)["events"] == 0
     assert prune_past(conn, "berlin", keep_days=0)["events"] == 1
-
-
-def test_the_llm_queue_does_not_outlive_its_event():
-    """The queue only grows while the AI tier is off; pruning has to reach it."""
-    conn = connect(":memory:")
-    eid = _ev(conn, "queued", days=[-40])
-    queue_for_llm(conn, eid)
-    conn.commit()
-    assert _count(conn, "llm_queue") == 1
-    prune_past(conn, "berlin")
-    assert _count(conn, "llm_queue") == 0
 
 
 def test_the_raw_snapshot_goes_too():
