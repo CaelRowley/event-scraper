@@ -31,20 +31,17 @@ CITIES = {
             "kulturdaten",
             "berlin_de",
             "ra",
-            "rausgegangen",
-            "tip_berlin",
             "prinzipal",
-            "eventbrite",
             "ticketmaster",
-            # Off the list, not deleted: livegigs, comedy_in_english and
-            # comedy_cafe refuse both the runner's IP and the relay's, so every
-            # run spent its budget collecting 403s and then failed the freshness
-            # gate — which stopped the whole feed from publishing over three
-            # sources that could not have contributed anything.
+            # Off the list, not deleted: tip_berlin, eventbrite, livegigs,
+            # comedy_in_english and comedy_cafe refuse this scraper's requests,
+            # and rausgegangen's robots.txt disallows its event sitemap. We take
+            # a refusal as an answer rather than routing around it, so their
+            # domains are in fetch.DENIED_DOMAINS and nothing contacts them.
             #
-            # Nothing is wrong with the adapters; all three answer 200 from a
-            # laptop. Put them back the day the scrape runs from an address they
-            # accept — a self-hosted runner is the cheap version of that.
+            # The adapters still work against the sites as they are. Bring one
+            # back only with the site's permission (or a feed/API it offers):
+            # drop its domain from DENIED_DOMAINS and re-add it here.
         ],
     ),
 }

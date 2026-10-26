@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 from .db import now_iso
 from .dedup import SOURCE_PRIORITY
-from .fetch import BROWSER_UA, RateSpec
+from .fetch import RateSpec
 from .probe import fan_out, select
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,6 @@ SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin")
 # berlin.de calendar page it imports from, and the adapter's full re-page every
 # run is still the liveness signal — retention and reconcile drop what vanished.
 LISTING_SOURCES = ("kulturdaten", "ra")
-BROWSER_UA_HOSTS = ("eventbrite.de", "eventbrite.com")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS link_checks(
@@ -56,12 +55,11 @@ CREATE TABLE IF NOT EXISTS link_checks(
 def _probe(fetcher, url: str) -> int | None:
     """Final HTTP status for the URL, or None on transport failure.
     HEAD first; any >=400 HEAD is confirmed with GET (some servers reject HEAD)."""
-    ua = BROWSER_UA if any(h in urlsplit(url).netloc for h in BROWSER_UA_HOSTS) else None
     try:
-        resp = fetcher.head(url, rate=RATE, user_agent=ua, check_robots=False)
+        resp = fetcher.head(url, rate=RATE, check_robots=False)
         if resp.status_code < 400:
             return resp.status_code
-        resp = fetcher.get(url, rate=RATE, user_agent=ua, check_robots=False)
+        resp = fetcher.get(url, rate=RATE, check_robots=False)
         return resp.status_code
     except Exception as exc:  # noqa: BLE001 — transport errors are inconclusive, not strikes
         log.debug("linkcheck probe %s failed: %s", url, exc)

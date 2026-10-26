@@ -31,11 +31,11 @@ were enough. Categories it assigned are kept until their event changes or ends.
 |---|---|---|
 | kulturdaten.berlin | open-data API (CC-BY) | cultural backbone; attraction/location details cached & budget-capped |
 | ra.co | GraphQL | club/electronic; browser UA + ≤1 req/s; never scrape its HTML |
-| rausgegangen.de | sitemap + JSON-LD | national aggregator, Berlin-filtered |
-| tip-berlin.de | sitemap + JSON-LD | URL paths encode categories |
+| ~~rausgegangen.de~~ | sitemap + JSON-LD | parked — robots.txt disallows the event sitemap |
+| ~~tip-berlin.de~~ | sitemap + JSON-LD | parked — refuses the runner (403 on every event page) |
 | berlin.de | Simple-Search JSON | markets & street festivals; identifying UA required |
-| ~~livegigs.de~~ | JSON-LD in listing pages | parked — refuses the runner's IP and the relay's |
-| eventbrite.de | `__SERVER_DATA__` blob (brace-matched) | workshops/talks/community long tail |
+| ~~livegigs.de~~ | JSON-LD in listing pages | parked — refuses the runner |
+| ~~eventbrite.de~~ | `__SERVER_DATA__` blob (brace-matched) | parked — refuses the runner |
 | Ticketmaster | Discovery API (key) | supplement; minimal fields, refreshed every run |
 
 Dead/blocked by design: Songkick, Bandsintown, Eventbrite search API, Eventim,
@@ -132,8 +132,9 @@ tallies outcomes per source (attributed by thread name, which the runner sets to
 the slug), counting 403/405/429/451 as blocked and leaving 404/410 out of it — a
 missing page says nothing about our standing. `robots.txt` is fetched off the raw
 client, so a blocked source cannot look healthy on the strength of one 200. The
-run reports `source_http` and `blocked_sources`, and the freshness gate fails on
-the latter.
+run reports `source_http` and `blocked_sources` (which also counts a source
+whose host tripped the circuit breaker mid-run), and the source health step warns
+on the latter without failing the run.
 
 Two things can earn a refusal. The first is what we send: a source that opts into
 `BROWSER_UA` now gets Chrome's companion headers too (`Sec-Ch-Ua`, `Sec-Fetch-*`,
@@ -142,43 +143,21 @@ trivially detectable — a filter does not need to fingerprint TLS to notice tha
 "Chrome" forgot `Sec-Ch-Ua`. Caller headers still win, so an adapter asking for
 `application/json` is not handed Chrome's HTML `Accept`.
 
-The second is *where* the request comes from, and no header fixes that: all four
-of the refused sources answer 200 from a laptop with either User-Agent, which
-points at GitHub's runner IP ranges. Their robots.txt allows the paths we ask
-for, so the refusal is a blanket datacenter rule rather than a decision about
-this crawler.
+The second is *who* is asking, and we take that answer as given. A site that
+refuses every request from the runner, or whose robots.txt disallows what an
+adapter needs, has said no. We do not route around it — a Cloudflare Worker relay
+once did exactly that for eventbrite and was removed. Instead the source is parked
+in `config.py` and its domain goes in `fetch.DENIED_DOMAINS`, which the fetcher
+checks before every request, so neither the adapter nor the image scan nor the
+link check contacts it again (not even for robots.txt). Currently denied:
+tip-berlin, eventbrite, rausgegangen, livegigs, the two Tribe comedy venues, and
+ticketmaster.de's event pages (the Discovery API is a different host). A source
+comes back only with the site's permission or a feed it offers.
 
-`proxy/` answers that: a Cloudflare Worker the scrape can route those four hosts
-through. Cloudflare's egress is not on the wrong side of the rule — all four
-answer 200 from it, measured before the Worker was written. It is deliberately
-not a general proxy: bearer token compared in constant time, an explicit host
-allowlist, GET and HEAD only, https only, and redirects that leave the allowlist
-are refused. A leaked token buys an attacker nothing but four sites we already
-scrape in public.
-
-```
-cd proxy && npx wrangler deploy && npx wrangler secret put PROXY_TOKEN
-gh secret set FETCH_PROXY_URL   --body "https://event-scraper-proxy.<subdomain>.workers.dev"
-gh secret set FETCH_PROXY_TOKEN --body "<the same token>"
-```
-
-Only eventbrite is routed, and only measurement settled that. A deployed Worker
-egresses from a different pool than `wrangler dev --remote`, so a probe against
-the preview environment said all four blocked sources would work and exactly one
-did. livegigs and the two Tribe comedy venues refuse the Worker as well, so they
-are parked in `config.py` rather than relayed — leaving them enabled cost a
-budget of 403s and failed the freshness gate, which stopped the entire feed from
-publishing over three sources that could not contribute anything. All three
-still answer 200 from a laptop; a self-hosted runner would bring them back.
-
-At two relayed requests per run, this sits four orders of magnitude inside the
-Workers free tier.
-
-Only `PROXIED_HOSTS` in `fetch.py` is routed; everything else goes direct. robots
-and the per-domain rate limit are applied to the real URL before the rewrite, so
-sending the bytes by another road loosens neither. With the secrets unset every
-request goes direct and the blocked sources simply stay blocked — which the
-freshness gate reports rather than hides.
+New refusals stay visible: the source health step prints a warning for every
+source in `blocked_sources` and the circuit breaker gives up on a refusing host
+after `TRIP_AFTER` (8) requests, so a newly hostile site costs a handful of
+requests and a warning until it is parked.
 
 **The two horizons.** `SCRAPE_WINDOW_DAYS` (31) is how far ahead adapters are
 asked to look; `EXPORT_WINDOW_DAYS` (30) is how far ahead the feed publishes.
@@ -258,8 +237,7 @@ slower run, dedup clusters recompute. The
 slowest to rebuild is the image-scan ledger (~150 pages/run), which affects
 coverage, not correctness.
 
-Secrets: `TICKETMASTER_KEY`, the `R2_*` set, and optionally
-`FETCH_PROXY_URL`/`FETCH_PROXY_TOKEN`. (`ANTHROPIC_API_KEY` is no longer read
+Secrets: `TICKETMASTER_KEY` and the `R2_*` set. (`ANTHROPIC_API_KEY` is no longer read
 and can be deleted.)
 
 Sources fetch concurrently (one thread per adapter, own SQLite connection each);
@@ -330,7 +308,8 @@ original listing; honest identifying User-Agent naming this repository, so a sit
 that wants us to stop has somewhere to say so — it used to carry a personal email
 and a repository URL that never existed, which made half the contact unreachable
 (browser UA only
-where a source blocks non-browser clients — RA, Eventbrite); robots.txt enforced via
+where a source blocks non-browser clients — RA); a site that refuses us is left
+alone, never relayed around (`fetch.DENIED_DOMAINS`); robots.txt enforced via
 Protego; per-source kill switch in `config.py`; images are hotlinked with a
 placeholder fallback (no re-hosting); Ticketmaster fields are refreshed each run,
 not archived.
@@ -358,8 +337,8 @@ that are the point of the feed.
 
 ## Multi-city
 
-A city is config (`src/pipeline/config.py`): timezone + source list. rausgegangen
-(~60 German cities), Ticketmaster, and Eventbrite already work in other cities;
+A city is config (`src/pipeline/config.py`): timezone + source list. Ticketmaster
+already works in other cities;
 adding one means picking its local sources and seeding venue priors.
 
 Trigger a full run to populate the bucket for the first time.

@@ -99,66 +99,34 @@ def test_no_accept_encoding_is_advertised():
     assert not any(k.lower() == "accept-encoding" for k in BROWSER_HEADERS)
 
 
-# --- the relay for hosts that refuse datacenter IPs ------------------------------
+# --- sites that refused us are not contacted at all -----------------------------
 
-def _fetcher(monkeypatch, *, proxy=True):
-    if proxy:
-        monkeypatch.setenv("FETCH_PROXY_URL", "https://relay.example/fetch")
-        monkeypatch.setenv("FETCH_PROXY_TOKEN", "s3cret")
-    else:
-        monkeypatch.delenv("FETCH_PROXY_URL", raising=False)
-        monkeypatch.delenv("FETCH_PROXY_TOKEN", raising=False)
-    return Fetcher(cache_path=None)
+def test_a_denied_domain_is_never_requested():
+    """No request leaves for a denied site — not the page, not robots.txt."""
+    from pipeline.fetch import HostBlockedError
 
+    def handler(request):
+        raise AssertionError(f"request sent to {request.url}")
 
-def test_a_blocked_host_is_routed_through_the_relay(monkeypatch):
-    f = _fetcher(monkeypatch)
+    f = Fetcher(cache_path=None)
+    f.client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
-        url, headers = f._proxied("GET", "https://www.eventbrite.de/d/berlin/events/", {"User-Agent": "x"})
-        assert url.startswith("https://relay.example/fetch?url=")
-        assert "https%3A%2F%2Fwww.eventbrite.de" in url
-        assert headers["Authorization"] == "Bearer s3cret"
-        assert headers["User-Agent"] == "x", "the caller's headers must survive"
+        for url in ("https://www.tip-berlin.de/event/x/",
+                    "https://www.eventbrite.de/d/berlin/events/",
+                    "https://rausgegangen.de/sitemap-events.xml"):
+            assert f.tripped(url)
+            assert not f.allowed(url)
+            with pytest.raises(HostBlockedError):
+                f.get(url, check_robots=False)
+        assert f.tripped_hosts() == [], "denied is standing policy, not a run event"
     finally:
         f.close()
 
 
-def test_every_other_host_still_goes_direct(monkeypatch):
-    f = _fetcher(monkeypatch)
-    try:
-        url, headers = f._proxied("GET", "https://api-v2.kulturdaten.berlin/x", {})
-        assert url == "https://api-v2.kulturdaten.berlin/x"
-        assert "Authorization" not in headers, "no token leaks to unrelated hosts"
-    finally:
-        f.close()
-
-
-def test_post_is_never_relayed(monkeypatch):
-    """RA's GraphQL POST is not blocked, and the relay refuses writes anyway."""
-    f = _fetcher(monkeypatch)
-    try:
-        url, _ = f._proxied("POST", "https://www.eventbrite.de/d/berlin/events/", {})
-        assert url == "https://www.eventbrite.de/d/berlin/events/"
-    finally:
-        f.close()
-
-
-def test_without_credentials_everything_goes_direct(monkeypatch):
-    f = _fetcher(monkeypatch, proxy=False)
-    try:
-        url, headers = f._proxied("GET", "https://www.eventbrite.de/x", {})
-        assert url == "https://www.eventbrite.de/x"
-        assert "Authorization" not in headers
-    finally:
-        f.close()
-
-
-def test_a_lookalike_host_is_not_relayed(monkeypatch):
-    """Membership is exact — eventbrite.de.evil.com must not borrow the token."""
-    f = _fetcher(monkeypatch)
-    try:
-        url, headers = f._proxied("GET", "https://www.eventbrite.de.evil.com/x", {})
-        assert url == "https://www.eventbrite.de.evil.com/x"
-        assert "Authorization" not in headers
-    finally:
-        f.close()
+def test_denial_matches_subdomains_but_not_lookalikes():
+    from pipeline.fetch import is_denied
+    assert is_denied("https://tip-berlin.de/x")
+    assert is_denied("https://www.ticketmaster.de/event/123")
+    assert not is_denied("https://app.ticketmaster.com/discovery/v2/events.json")
+    assert not is_denied("https://notrausgegangen.de/x")
+    assert not is_denied("https://eventbrite.de.evil.com/x")

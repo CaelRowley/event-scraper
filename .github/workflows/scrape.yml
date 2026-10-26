@@ -56,10 +56,6 @@ jobs:
 
       - name: Run pipeline
         env:
-          # Optional relay for sources that refuse this runner's IP (PROXIED_HOSTS).
-          # Unset, they stay blocked and the source health step warns about it.
-          FETCH_PROXY_URL: ${{ secrets.FETCH_PROXY_URL }}
-          FETCH_PROXY_TOKEN: ${{ secrets.FETCH_PROXY_TOKEN }}
           # Accept the original documented name and the TICKET_MASTER_KEY name
           # already configured in this repository; the Python adapter reads the
           # normalized TICKETMASTER_KEY environment variable either way.
@@ -157,10 +153,10 @@ jobs:
           # `errors` — adapters contain those and return empty. Zero yield alone is
           # not the signal (a sitemap source with no new pages is healthy); every
           # request being refused is.
-          # Blocks are reported, not failed on: they come from the runner's IP
-          # (tip-berlin WAFs GitHub's ranges; the relay gets the same 403s), so
-          # no change to this repo fixes them and a red run every day for it
-          # would only teach everyone to ignore red. Errors and phases still fail.
+          # Blocks are reported, not failed on: the answer to a site refusing us
+          # is to park the source and add it to fetch.DENIED_DOMAINS, not a code
+          # fix, and a red run every day until someone does would only teach
+          # everyone to ignore red. Errors and phases still fail.
           for slug in t.get("blocked_sources", []):
               print(f"::warning::source {slug} is blocking this runner's IP")
           for phase, err in t.get("phase_errors", {}).items():

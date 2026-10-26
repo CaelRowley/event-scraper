@@ -7,13 +7,12 @@ the per-domain bucket.
 from __future__ import annotations
 
 import logging
-import os
 import random
 import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from protego import Protego
@@ -74,16 +73,30 @@ def _browser_headers(user_agent: str | None, extra: dict) -> dict:
     return headers
 
 
-# Hosts worth routing through the relay: refused from the runner's IP, accepted
-# from Cloudflare's. Their robots.txt allows the paths we ask for, so the refusal
-# is a blanket datacenter-IP rule rather than a decision about this crawler.
+# Sites that have told this scraper no — a WAF refusing every request from our
+# runner, or robots.txt disallowing what the adapter needs. Nothing contacts them:
+# not their adapter, not the image scan, not the link check. We do not route
+# around a refusal (a relay through other IPs used to do that for eventbrite);
+# a site that blocks us is a site we leave alone. Matched as the domain or any
+# subdomain, so this covers every host the site serves pages from.
 #
-# Only eventbrite qualifies, and only measurement settled that. livegigs and the
-# two Tribe comedy venues refuse the deployed Worker's egress as well — the pool
-# a deployed Worker sends from is not the one `wrangler dev --remote` uses, so an
-# earlier probe against the preview environment said all four would work and only
-# one did. Routing the other three here would spend a request to get the same 403.
-PROXIED_HOSTS = frozenset({"www.eventbrite.de"})
+# Their adapters are parked in config.py, not deleted. To bring one back, get
+# the site's permission (or a feed/API), then remove it here and re-enable it.
+DENIED_DOMAINS = frozenset({
+    "tip-berlin.de",         # WAF 403s every event page from GitHub's IP ranges
+    "eventbrite.de",         # refuses GitHub's IPs; only ever reached via the relay
+    "eventbrite.com",
+    "rausgegangen.de",       # robots.txt disallows the event sitemap
+    "ticketmaster.de",       # event pages 403 the runner; the Discovery API is separate
+    "livegigs.de",           # refuses GitHub's IPs
+    "comedyinenglish.de",    # refuses GitHub's IPs
+    "comedycafeberlin.com",  # refuses GitHub's IPs
+})
+
+
+def is_denied(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in DENIED_DOMAINS)
 
 
 # A host that refuses this many requests in a row is not asked again for the rest
@@ -173,13 +186,9 @@ class Fetcher:
         # is fetched off `self.client` directly and never reaches this, which is what
         # keeps a blocked source from looking healthy on the strength of one 200.
         self._source_http: dict[str, Counter] = defaultdict(Counter)
-        # Set both to route PROXIED_HOSTS through the relay; unset, every request
-        # goes direct and the blocked sources simply stay blocked.
         # Consecutive refusals per host, and the hosts that crossed TRIP_AFTER.
         self._refusals: Counter = Counter()
         self._tripped: set[str] = set()
-        self._proxy_url = os.environ.get("FETCH_PROXY_URL") or None
-        self._proxy_token = os.environ.get("FETCH_PROXY_TOKEN") or None
 
     # --- politeness -----------------------------------------------------------
 
@@ -205,8 +214,8 @@ class Fetcher:
     # --- circuit breaker --------------------------------------------------------
 
     def tripped(self, url: str) -> bool:
-        """Whether this URL's host has been given up on for the rest of the run."""
-        return urlsplit(url).netloc in self._tripped
+        """Whether this URL's host is denied, or was given up on for this run."""
+        return is_denied(url) or urlsplit(url).netloc in self._tripped
 
     def tripped_hosts(self) -> list[str]:
         with self._counter_lock:
@@ -244,30 +253,14 @@ class Fetcher:
         return self._robots[domain]
 
     def allowed(self, url: str, user_agent: str | None = None) -> bool:
+        if is_denied(url):
+            return False  # not even robots.txt
         rp = self._robots_for(url)
         if rp is None:
             return True
         return rp.can_fetch(url, user_agent or self.default_ua)
 
     # --- requests --------------------------------------------------------------
-
-    def _proxied(self, method: str, url: str, headers: dict) -> tuple[str, dict]:
-        """Rewrite to the relay when this host needs it. Otherwise unchanged.
-
-        Only GET and HEAD: the relay refuses anything else, and the one POST we
-        make (RA's GraphQL) is not blocked. robots and the per-domain rate limit
-        were already applied to the real URL by the caller, so routing the bytes
-        elsewhere does not loosen either.
-        """
-        if not (self._proxy_url and self._proxy_token):
-            return url, headers
-        if method not in ("GET", "HEAD"):
-            return url, headers
-        if urlsplit(url).netloc not in PROXIED_HOSTS:
-            return url, headers
-        headers = dict(headers)
-        headers["Authorization"] = f"Bearer {self._proxy_token}"
-        return f"{self._proxy_url}?url={quote(url, safe='')}", headers
 
     @retry(
         retry=retry_if_exception(_retryable),
@@ -277,9 +270,8 @@ class Fetcher:
     )
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         deadline = time.monotonic() + MAX_RESPONSE_SECONDS
-        host = urlsplit(url).netloc  # the real host, before any relay rewrite
+        host = urlsplit(url).netloc
         kwargs["headers"] = dict(kwargs.get("headers") or {})
-        url, kwargs["headers"] = self._proxied(method, url, kwargs["headers"])
         request = self.client.build_request(method, url, **kwargs)
         resp = self.client.send(request, stream=True)
         with self._counter_lock:
