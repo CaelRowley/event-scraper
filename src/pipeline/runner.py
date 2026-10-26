@@ -29,7 +29,7 @@ from .db import connect, reconcile_occurrences, set_category, snapshot, upsert_e
 from .dedup import run_dedup
 from .export import export_city
 from .retention import prune_past
-from .fetch import Fetcher
+from .fetch import Fetcher, HostBlockedError
 from .images import backfill_images
 from .linkcheck import check_images, check_links
 from .stock_photos import backfill_stock_photos
@@ -51,6 +51,9 @@ class AdapterResult:
     count: int = 0
     tier_counts: Counter = field(default_factory=Counter)
     error: str | None = None
+    # The source's host refused us until the circuit breaker gave up on it — a
+    # block (needs a different egress IP), not a bug, so it is not an `error`.
+    blocked: bool = False
 
 
 def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: str,
@@ -103,6 +106,12 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
                 reconcile_occurrences(conn, eid, starts)
                 conn.commit()
         conn.commit()  # sitemap adapters write their ledger after the final yield
+    except HostBlockedError as exc:
+        # Before the generic handler: what it yielded before the trip is kept
+        # (committed per event); reconcile is skipped, as for any partial run.
+        conn.rollback()
+        res.blocked = True
+        log.warning("source %s blocked: %s", slug, exc)
     except Exception as exc:  # noqa: BLE001 — one dead source never blocks the run
         conn.rollback()  # release any held write lock before reporting
         res.error = f"{type(exc).__name__}: {exc}"
@@ -149,6 +158,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     tier_counts: Counter = Counter()
     source_counts: Counter = Counter()
     errors: dict[str, str] = {}
+    tripped_sources: set[str] = set()
     phase_errors: dict[str, str] = {}
 
     max_workers = min(len(tasks) or 1, int(os.environ.get("PIPELINE_MAX_WORKERS", "12")))
@@ -165,6 +175,8 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
             tier_counts.update(r.tier_counts)
             if r.error:
                 errors[r.slug] = r.error
+            if r.blocked:
+                tripped_sources.add(r.slug)
     scrape_seconds = round(time.monotonic() - started, 1)
 
     dedup_stats = run_dedup(conn, city.slug)
@@ -203,10 +215,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         slug: counts for slug, counts in fetcher.source_http().items()
         if slug in {s for s, _ in tasks}
     }
-    blocked_sources = sorted(
+    # Also a source whose host tripped the breaker mid-run: tip-berlin serves its
+    # sitemaps fine and 403s every event page, so it never looks all-refused.
+    blocked_sources = sorted(tripped_sources | {
         slug for slug, counts in source_http.items()
         if counts.get("blocked", 0) and not counts.get("ok", 0)
-    )
+    })
     if blocked_sources:
         log.error("sources refused every request: %s", ", ".join(blocked_sources))
 

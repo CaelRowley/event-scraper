@@ -14,7 +14,7 @@ import httpx
 import pipeline.config as cfg
 import pipeline.runner as runner_mod
 from pipeline.db import connect, ledger_get, ledger_put, upsert_event
-from pipeline.fetch import Fetcher, RateSpec
+from pipeline.fetch import Fetcher, HostBlockedError, RateSpec
 from pipeline.models import Event, Occurrence, Price, RawEvent
 from pipeline.adapters.base import SourceAdapter
 from pipeline.runner import run
@@ -198,6 +198,37 @@ def test_runner_isolates_adapter_failures(tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM events WHERE source_slug='fake_boom'").fetchone()[0] == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM events WHERE source_slug='fake_ok'").fetchone()[0] == 2
+
+
+class FakeAdapterTripped(SourceAdapter):
+    slug = "fake_tripped"
+
+    def fetch_events(self, window_days=14, limit=None):
+        yield RawEvent(source=self.slug, source_event_id="t0",
+                       source_url="https://waf.example/0", title="Before the trip",
+                       start="2199-06-13T20:00:00")
+        raise HostBlockedError("waf.example is refusing requests")
+
+
+def test_a_tripped_source_is_blocked_not_failed(tmp_path, monkeypatch):
+    """Sitemaps served, event pages 403'd (tip-berlin): the breaker trips mid-run.
+    That is the runner's IP being refused, so it is reported as a block — not as
+    an error, which the health check fails the run on."""
+    db = str(tmp_path / "run.db")
+    monkeypatch.setattr(cfg, "HTTP_CACHE_PATH", None)
+    monkeypatch.setattr(cfg, "PUBLIC_DIR", str(tmp_path / "public"))
+    monkeypatch.setattr(cfg, "select_adapters",
+                        lambda city, **kw: [("fake_ok", FakeAdapterOK),
+                                            ("fake_tripped", FakeAdapterTripped)])
+    for name in ("backfill_images", "check_links", "check_images"):
+        monkeypatch.setattr(runner_mod, name, lambda conn, fetcher, city: {})
+    monkeypatch.setattr(runner_mod, "backfill_stock_photos", lambda conn, city, fetcher: {})
+
+    telemetry = run("berlin", db_path=db)
+
+    assert telemetry["errors"] == {}
+    assert telemetry["blocked_sources"] == ["fake_tripped"]
+    assert telemetry["sources"]["fake_tripped"] == 1  # what it got before the trip is kept
 
 
 def test_a_failing_enrichment_phase_does_not_cost_the_export(tmp_path, monkeypatch):
