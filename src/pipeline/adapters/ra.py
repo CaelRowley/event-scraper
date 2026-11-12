@@ -1,9 +1,13 @@
-"""Resident Advisor — hidden GraphQL API (verified live 2026-06-10). Club/electronic backbone.
+"""Resident Advisor — OFF by default (`sources.py`: needs_permission).
 
-POST https://ra.co/graphql, unauthenticated. Berlin = area 34. HTML pages are
-Cloudflare-403 — never scrape them; the GraphQL endpoint requires a browser UA
-(documented exception to the honest-UA default; we compensate with ≤1 req/s and
-per-event linkbacks). ~70 listings/day.
+ra.co's Terms of Use (4.4(a), 4.4(f)) allow automated access, and extraction for
+commercial purposes, only under a written agreement with RA. This adapter queries
+the GraphQL endpoint RA's own website uses, which is undocumented and used to be
+reached by sending a browser User-Agent and a ra.co Referer. Both are gone: it now
+identifies itself like every other request, and it does not run unless RA has
+agreed and `ra` is named in PIPELINE_PERMITTED_SOURCES.
+
+POST https://ra.co/graphql. Berlin = area 34. ~70 listings/day.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ import logging
 from collections.abc import Iterator
 from datetime import date, timedelta
 
-from ..fetch import BROWSER_UA, RateSpec
+from ..fetch import RateSpec
 from ..models import RawEvent
 from .base import SourceAdapter
 
@@ -40,7 +44,6 @@ class ResidentAdvisorAdapter(SourceAdapter):
     slug = "ra"
     category_prior = "club_nightlife"
     rate = RateSpec(min_interval=1.0, jitter=(0.2, 0.8))
-    user_agent = BROWSER_UA
     cheap_delta = True
 
     def fetch_events(self, window_days: int = 14, limit: int | None = None) -> Iterator[RawEvent]:
@@ -58,8 +61,7 @@ class ResidentAdvisorAdapter(SourceAdapter):
             resp = self.post(
                 GRAPHQL,
                 json={"query": QUERY, "variables": {"filters": filters, "pageSize": PAGE_SIZE, "page": page}},
-                headers={"Referer": "https://ra.co/events/de/berlin", "Content-Type": "application/json"},
-                check_robots=False,  # POST endpoint; ra.co robots does not disallow /graphql (verified)
+                headers={"Content-Type": "application/json"},
             )
             resp.raise_for_status()
             body = resp.json()

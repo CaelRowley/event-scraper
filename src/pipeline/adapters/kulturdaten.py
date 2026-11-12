@@ -1,4 +1,10 @@
-"""kulturdaten.berlin — official open-data API (CC-BY, keyless). The cultural backbone.
+"""kulturdaten.berlin — open-data API of Technologiestiftung Berlin (keyless). The cultural backbone.
+
+Licence, as read on 2026-11-12: the operator invites reuse ("frei und einfach
+zugänglich, z.B. um diese für eigene Anwendungen zu nutzen") but publishes no
+formal data licence for the API records; only the project README says "Text and
+content available as CC BY" (3.0 DE). Records are imports of berlin.de's district
+calendar. We credit both and carry the descriptions on that basis — see sources.py.
 
 Endpoint (verified 2026-06-10): GET https://api-v2.kulturdaten.berlin/api/events
   - ?startDate=YYYY-MM-DD filters to events starting on/after that date
@@ -104,7 +110,7 @@ class KulturdatenAdapter(SourceAdapter):
         if self._detail_spent >= self.detail_budget:
             return None
         try:
-            resp = self.get(f"{API}/{endpoint}/{ref_id}", check_robots=False)
+            resp = self.get(f"{API}/{endpoint}/{ref_id}")
             if resp.status_code != 200:
                 return None
             payload = resp.json().get("data", {}).get(key, {})
@@ -131,7 +137,6 @@ class KulturdatenAdapter(SourceAdapter):
         while True:
             resp = self.get(
                 f"{API}/events", params={"page": page, "pageSize": 500, "startDate": today.isoformat()},
-                check_robots=False,
             )
             resp.raise_for_status()
             data = resp.json()["data"]
@@ -210,7 +215,7 @@ class KulturdatenAdapter(SourceAdapter):
             is_free=is_free,
             category_raw=category_raw,
             description=(attr.get("description", {}) or {}).get("de"),
-            description_public=True,  # CC-BY open data — exportable with attribution
+            description_public=True,  # open data, credited — see sources.py
             event_status=status,
             payload={"event": entry, "description": (attr.get("description", {}) or {}).get("de", "")[:1500]},
         )

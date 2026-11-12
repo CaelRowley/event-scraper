@@ -67,36 +67,59 @@ def test_a_source_that_answers_is_not_flagged():
         fetcher.close()
 
 
-# --- browser headers -------------------------------------------------------------
+# --- one honest identity ---------------------------------------------------------
 
-def test_browser_ua_requests_carry_chromes_companion_headers():
-    """Claiming to be Chrome while sending none of Chrome's headers is detectable."""
-    from pipeline.fetch import BROWSER_UA, _browser_headers
-    h = _browser_headers(BROWSER_UA, {})
-    assert h["User-Agent"] == BROWSER_UA
-    assert h["Sec-Ch-Ua-Platform"] == '"Linux"'
-    assert "Sec-Fetch-Mode" in h and "Accept" in h
+def _recording_fetcher():
+    seen = []
 
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(404 if request.url.path == "/robots.txt" else 200, json={})
 
-def test_the_honest_bot_ua_stays_minimal():
-    """We do not pretend to be a browser when we have said we are a crawler."""
-    from pipeline.fetch import DEFAULT_UA, _browser_headers
-    h = _browser_headers(DEFAULT_UA, {})
-    assert h == {"User-Agent": DEFAULT_UA}
+    f = Fetcher(cache_path=None)
+    f.client = httpx.Client(transport=httpx.MockTransport(handler),
+                            headers=dict(f.client.headers))
+    return f, seen
 
 
-def test_caller_headers_win():
-    """An adapter asking for JSON must not be given Chrome's HTML Accept."""
-    from pipeline.fetch import BROWSER_UA, _browser_headers
-    h = _browser_headers(BROWSER_UA, {"Accept": "application/json"})
-    assert h["Accept"] == "application/json"
-    assert "Sec-Ch-Ua" in h
+def test_every_request_identifies_the_collector_with_a_contact_url():
+    from pipeline.fetch import CONTACT_URL, USER_AGENT
+    assert USER_AGENT.startswith("events-pipeline/")
+    assert CONTACT_URL.startswith("https://") and f"(+{CONTACT_URL})" in USER_AGENT
+    f, seen = _recording_fetcher()
+    try:
+        f.get("https://site.example/page")
+        f.head("https://site.example/page")
+        f.post("https://site.example/graphql", json={})
+        assert len(seen) == 4  # robots.txt once, then the three requests
+        assert {r.headers["user-agent"] for r in seen} == {USER_AGENT}
+    finally:
+        f.close()
 
 
-def test_no_accept_encoding_is_advertised():
-    """httpx negotiates it; advertising br/zstd we cannot decode breaks the body."""
-    from pipeline.fetch import BROWSER_HEADERS
-    assert not any(k.lower() == "accept-encoding" for k in BROWSER_HEADERS)
+def test_a_caller_cannot_swap_the_user_agent_or_claim_to_be_a_browser():
+    from pipeline.fetch import USER_AGENT
+    f, seen = _recording_fetcher()
+    try:
+        f.get("https://site.example/page",
+              headers={"User-Agent": "Mozilla/5.0 Chrome/131", "Accept": "application/json"})
+        sent = seen[-1].headers
+        assert sent["user-agent"] == USER_AGENT
+        assert sent["accept"] == "application/json"  # ordinary headers still pass
+        assert not any(k.lower().startswith("sec-") for k in sent)
+    finally:
+        f.close()
+
+
+def test_no_browser_user_agent_or_robots_bypass_exists_in_the_source_tree():
+    """The mechanisms themselves are gone, not just unused: nothing can opt back in."""
+    from pathlib import Path
+    import pipeline
+    src = Path(pipeline.__file__).parent
+    code = "\n".join(p.read_text() for p in src.rglob("*.py"))
+    for needle in ("BROWSER_UA", "BROWSER_HEADERS", "Sec-Ch-Ua", "Mozilla/5.0",
+                   "check_robots", "FETCH_PROXY"):
+        assert needle not in code, f"{needle} is back in src/"
 
 
 # --- sites that refused us are not contacted at all -----------------------------
@@ -117,7 +140,7 @@ def test_a_denied_domain_is_never_requested():
             assert f.tripped(url)
             assert not f.allowed(url)
             with pytest.raises(HostBlockedError):
-                f.get(url, check_robots=False)
+                f.get(url)
         assert f.tripped_hosts() == [], "denied is standing policy, not a run event"
     finally:
         f.close()

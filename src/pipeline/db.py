@@ -121,6 +121,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE events ADD COLUMN stock_image_url TEXT")
         conn.execute("ALTER TABLE events ADD COLUMN stock_attribution TEXT")
         conn.execute("ALTER TABLE events ADD COLUMN stock_attempted_at TEXT")
+    if "image_credit" not in cols:
+        # The credit line a source supplies with its own image (Ticketmaster's
+        # `attribution`). Published beside the image; never invented.
+        conn.execute("ALTER TABLE events ADD COLUMN image_credit TEXT")
 
 
 # --- crawl ledger -----------------------------------------------------------
@@ -189,15 +193,15 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
             """INSERT INTO events(id,canonical_id,city,source_slug,source_event_id,source_url,title,
                  category,category_tier,category_confidence,tags_json,source_category_raw,
                  is_range,range_start,range_end,event_status,attendance_mode,
-                 venue_id,venue_name,address_json,lat,lon,price_json,image_url,content_hash,
-                 description,first_seen_at,last_seen_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 venue_id,venue_name,address_json,lat,lon,price_json,image_url,image_credit,
+                 content_hash,description,first_seen_at,last_seen_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ev.id, ev.canonical_id, ev.city, ev.source, ev.source_event_id, ev.source_url,
              ev.title, ev.category, ev.category_tier, ev.category_confidence,
              json.dumps(ev.tags), ev.source_category_raw,
              int(ev.is_range), ev.range_start, ev.range_end, ev.event_status, ev.attendance_mode,
              ev.venue_id, ev.venue_name, json.dumps(ev.address), ev.lat, ev.lon,
-             json.dumps(ev.price.to_json()), ev.image_url, new_hash,
+             json.dumps(ev.price.to_json()), ev.image_url, ev.image_credit, new_hash,
              (ev.description if ev.description_public else None), now, now),
         )
         changed = True
@@ -215,12 +219,14 @@ def upsert_event(conn, ev: Event) -> tuple[str, bool]:
             conn.execute(
                 """UPDATE events SET title=?, source_url=?, is_range=?, range_start=?, range_end=?,
                      event_status=?, attendance_mode=?, venue_id=?, venue_name=?, address_json=?,
-                     lat=?, lon=?, price_json=?, image_url=COALESCE(?, image_url), content_hash=?,
+                     lat=?, lon=?, price_json=?, image_url=COALESCE(?, image_url),
+                     image_credit=CASE WHEN ? IS NOT NULL THEN ? ELSE image_credit END,
+                     content_hash=?,
                      source_category_raw=?, description=?, last_seen_at=? WHERE id=?""",
                 (ev.title, ev.source_url, int(ev.is_range), ev.range_start, ev.range_end,
                  ev.event_status, ev.attendance_mode, ev.venue_id, ev.venue_name,
                  json.dumps(ev.address), ev.lat, ev.lon, json.dumps(ev.price.to_json()),
-                 ev.image_url, new_hash, ev.source_category_raw,
+                 ev.image_url, ev.image_url, ev.image_credit, new_hash, ev.source_category_raw,
                  (ev.description if ev.description_public else None), now, ev.id),
             )
     if changed:

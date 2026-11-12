@@ -68,6 +68,16 @@ jobs:
           # quick dev smoke run — caps events/source and makes the R2 publish
           # upload-only (see below). 0 (or unset) = normal full scrape.
           SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
+          # Source policy (src/pipeline/sources.py). A source whose site has not
+          # agreed stays off; once it has, in writing, name its slug in the
+          # PERMITTED_SOURCES repository variable (comma-separated, e.g. "ra").
+          PIPELINE_PERMITTED_SOURCES: ${{ vars.PERMITTED_SOURCES }}
+          # "1" publishes Wikimedia Commons stand-in photos. Leave unset until
+          # the client shows author, licence and link wherever a photo appears.
+          PIPELINE_STOCK_PHOTOS: ${{ vars.STOCK_PHOTOS }}
+          # Extra takedown entries that should not sit in the public
+          # suppressions.yaml (same YAML, as a secret).
+          PIPELINE_SUPPRESSIONS: ${{ secrets.SUPPRESSIONS }}
         run: |
           set -o pipefail
           ARGS="--city berlin --mode $MODE"
@@ -154,9 +164,10 @@ jobs:
           # not the signal (a sitemap source with no new pages is healthy); every
           # request being refused is.
           # Blocks are reported, not failed on: the answer to a site refusing us
-          # is to park the source and add it to fetch.DENIED_DOMAINS, not a code
-          # fix, and a red run every day until someone does would only teach
-          # everyone to ignore red. Errors and phases still fail.
+          # is to switch the source off in sources.py (which also stops every
+          # request to its domain), not a code fix, and a red run every day
+          # until someone does would only teach everyone to ignore red. Errors
+          # and phases still fail.
           for slug in t.get("blocked_sources", []):
               print(f"::warning::source {slug} is blocking this runner's IP")
           for phase, err in t.get("phase_errors", {}).items():

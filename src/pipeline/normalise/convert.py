@@ -74,6 +74,7 @@ def to_event(raw: RawEvent, city: str, tz_name: str = "Europe/Berlin") -> Event 
         lon=raw.lon,
         price=price,
         image_url=raw.image_url,
+        image_credit=(raw.image_credit or "").strip() or None,
         occurrences=occurrences,
         description=(raw.description or "")[:2000] or None,
         description_public=raw.description_public,

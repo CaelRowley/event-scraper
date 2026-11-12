@@ -31,8 +31,8 @@ MIN_STRIKE_GAP = timedelta(hours=20)
 DEAD_STATUSES = {404, 410}
 RATE = RateSpec(min_interval=1.0, jitter=(0.2, 0.8))
 
-# ra.co serves HTML only to browsers (Cloudflare) — its GraphQL API is the liveness
-# source of truth there, so link-checking its pages would only produce false deaths.
+# ra.co refuses non-browser clients, so its pages are never probed (and while the
+# source is off, fetch.is_denied keeps every request away from it anyway).
 # kulturdaten record URLs: the adapter re-pages the full listing every run, so an
 # event's presence there IS the liveness signal — probing the API record is redundant.
 SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin")
@@ -53,13 +53,14 @@ CREATE TABLE IF NOT EXISTS link_checks(
 
 
 def _probe(fetcher, url: str) -> int | None:
-    """Final HTTP status for the URL, or None on transport failure.
-    HEAD first; any >=400 HEAD is confirmed with GET (some servers reject HEAD)."""
+    """Final HTTP status for the URL, or None when there is no verdict.
+    HEAD first; any >=400 HEAD is confirmed with GET (some servers reject HEAD).
+    A URL robots.txt disallows is not probed at all — that is no verdict, not a strike."""
     try:
-        resp = fetcher.head(url, rate=RATE, check_robots=False)
+        resp = fetcher.head(url, rate=RATE)
         if resp.status_code < 400:
             return resp.status_code
-        resp = fetcher.get(url, rate=RATE, check_robots=False)
+        resp = fetcher.get(url, rate=RATE)
         return resp.status_code
     except Exception as exc:  # noqa: BLE001 — transport errors are inconclusive, not strikes
         log.debug("linkcheck probe %s failed: %s", url, exc)
@@ -209,7 +210,7 @@ def check_images(conn, fetcher, city: str, budget: int = IMAGE_BUDGET) -> dict:
 def _probe_image(fetcher, url: str) -> tuple[int | None, str]:
     """(status, content-type) from a HEAD, or (None, "") when inconclusive."""
     try:
-        resp = fetcher.head(url, rate=RATE, check_robots=False)
+        resp = fetcher.head(url, rate=RATE)
     except Exception:  # noqa: BLE001 — transport errors are inconclusive
         return None, ""
     content_type = resp.headers.get("content-type", "") if hasattr(resp, "headers") else ""

@@ -19,7 +19,7 @@ def _ev(sid, title, day, hour, *, desc=None, img=None, lat=None, lon=None, url=N
         for d, h in [(day, hour)] + [(day, x) for x in extra_hours]
     ]
     return Event(
-        id="", source="ra", source_event_id=sid, source_url=url or f"https://ra.example/{sid}",
+        id="", source="kulturdaten", source_event_id=sid, source_url=url or f"https://kd.example/{sid}",
         title=title, city="berlin", venue_name="V", lat=lat, lon=lon, price=Price(),
         description=desc, description_public=bool(desc), image_url=img, occurrences=occ,
     )

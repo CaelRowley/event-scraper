@@ -1,0 +1,39 @@
+# Takedown list — events the feed must never publish. Read at every export
+# (src/pipeline/suppress.py). Add an entry, run the scrape workflow, and the
+# listing is gone from the feed on that run; its detail object is deleted from
+# the bucket straight away rather than after the usual 48-hour grace.
+#
+# Ticketmaster's API terms and the imprint both promise removal within 24 hours
+# of a valid request, so treat a request as same-day work.
+#
+# This file is public. Record what was removed and why, not who asked: where an
+# entry would expose a person, put the same YAML in the PIPELINE_SUPPRESSIONS
+# repository secret instead.
+#
+# Each entry:  - value: <what to match>
+#                reason: <optional note>
+#                date: <optional, when it was requested>
+
+# One listing, by the event id shown on the Gobento report (an occurrence id,
+# `<event id>::<start time>`, works too).
+events: []
+#  - value: 01JABCDEF0123456789ABCDEFG
+#    reason: organiser request
+#    date: 2026-11-12
+
+# A listing by its original URL. End a value with * to match everything under it.
+urls: []
+#  - value: https://example.org/events/our-private-party
+#  - value: https://example.org/events/*
+
+# Everything that links to one organiser's site (subdomains included).
+domains: []
+#  - value: example.org
+
+# Everything at one venue (matched ignoring case, accents and punctuation).
+venues: []
+#  - value: Example Hall
+
+# Everything whose title contains this text.
+titles: []
+#  - value: Example Promoter presents

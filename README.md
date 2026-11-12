@@ -10,11 +10,11 @@ The JSON isn't committed, so run the pipeline once locally to populate it.
 ## How it works
 
 ```
-source adapters → fetch (httpx + hishel RFC-9111 cache, robots gate, per-domain
-rate limit, retries) → extract (JSON-LD / hidden APIs / server-data blobs)
+source policy (who may run, what may be published) → source adapters → fetch
+(httpx + hishel RFC-9111 cache, robots gate, per-domain rate limit, retries) → extract (JSON-LD / hidden APIs / server-data blobs)
 → normalise (Europe/Berlin zoneinfo, German dates & prices, RRULE-ready occurrences)
 → dedup (blocked fuzzy matching, union-find) → categorise (rules)
-→ SQLite (WAL) → static JSON export → demo page
+→ SQLite (WAL) → takedown list → static JSON export → demo page
 ```
 
 Categorisation is rules only — no model, no API key, $0 to run: **source
@@ -27,19 +27,31 @@ were enough. Categories it assigned are kept until their event changes or ends.
 
 ## Sources (Berlin)
 
-| source | access | notes |
-|---|---|---|
-| kulturdaten.berlin | open-data API (CC-BY) | cultural backbone; attraction/location details cached & budget-capped |
-| ra.co | GraphQL | club/electronic; browser UA + ≤1 req/s; never scrape its HTML |
-| ~~rausgegangen.de~~ | sitemap + JSON-LD | parked — robots.txt disallows the event sitemap |
-| ~~tip-berlin.de~~ | sitemap + JSON-LD | parked — refuses the runner (403 on every event page) |
-| berlin.de | Simple-Search JSON | markets & street festivals; identifying UA required |
-| ~~livegigs.de~~ | JSON-LD in listing pages | parked — refuses the runner |
-| ~~eventbrite.de~~ | `__SERVER_DATA__` blob (brace-matched) | parked — refuses the runner |
-| Ticketmaster | Discovery API (key) | supplement; minimal fields, refreshed every run |
+Whether a source runs is decided in one place, `src/pipeline/sources.py`, from
+that site's own terms, licence and robots.txt (last read 2026-11-12). A source
+that is not permitted is not collected, its domains are not contacted by
+anything, what it already stored is purged, and none of it is exported.
 
-Dead/blocked by design: Songkick, Bandsintown, Eventbrite search API, Eventim,
-Google Places events. Deferred: Meetup (ToS), museumsportal, per-venue scrapers.
+| source | access | status | what is published |
+|---|---|---|---|
+| kulturdaten.berlin | open-data API | **on** | facts, description, link; credited (no formal data licence is published — confirmation requested) |
+| berlin.de markets & festivals | open-data JSON (`cc-by`) | **on** | facts, opening times/remarks, link; credited |
+| Ticketmaster | Discovery API (key) | **on** | facts, image with its credit, link to the Ticketmaster page; no description |
+| Prinzipal Kreuzberg | venue's public Events Calendar API | **on** | facts, image, link; no description |
+| ra.co | undocumented GraphQL | off — needs RA's written agreement | — |
+| tip-berlin.de | sitemap + JSON-LD | off — refuses the collector; data is licensed by Cine Marketing | — |
+| livegigs.de | JSON-LD in listing pages | off — refuses the collector | — |
+| comedyinenglish.de, comedycafeberlin.com | Events Calendar API | off — refused the collector; ask first | — |
+| rausgegangen.de | sitemap + JSON-LD | off — robots.txt and terms forbid it | — |
+| eventbrite.de | listing-page data blob | off — terms forbid it | — |
+
+A source comes back when its site has agreed in writing: name its slug in
+`PIPELINE_PERMITTED_SOURCES` (the `PERMITTED_SOURCES` repository variable in CI).
+No code change, and nothing else switches a source on — `--source ra` does not.
+
+Not built, by design: Songkick, Bandsintown, Meetup, Eventbrite's API (none
+licenses a multi-source commercial listing without a separate deal), Eventim
+(affiliate programme only, no data API), Google Places (no events).
 
 ## Run it
 
@@ -68,7 +80,7 @@ Cloudflare R2, and fails loudly when sources break or yield nothing.
 | cron | mode | sources |
 | --- | --- | --- |
 | `0 3 * * *` | `full` | every source in the city registry |
-| `0 13 * * *` | `delta` | the `cheap_delta` ones (kulturdaten, berlin.de, RA) |
+| `0 13 * * *` | `delta` | the `cheap_delta` ones (kulturdaten, berlin.de) |
 
 Which cron fired is what picks the mode, so the two `cron:` strings must stay
 byte-identical to the `MODE` expression that reads them. The full run is the
@@ -136,23 +148,25 @@ run reports `source_http` and `blocked_sources` (which also counts a source
 whose host tripped the circuit breaker mid-run), and the source health step warns
 on the latter without failing the run.
 
-Two things can earn a refusal. The first is what we send: a source that opts into
-`BROWSER_UA` now gets Chrome's companion headers too (`Sec-Ch-Ua`, `Sec-Fetch-*`,
-a real `Accept`), because claiming to be Chrome while sending none of them is
-trivially detectable — a filter does not need to fingerprint TLS to notice that
-"Chrome" forgot `Sec-Ch-Ua`. Caller headers still win, so an adapter asking for
-`application/json` is not handed Chrome's HTML `Accept`.
-
-The second is *who* is asking, and we take that answer as given. A site that
-refuses every request from the runner, or whose robots.txt disallows what an
-adapter needs, has said no. We do not route around it — a Cloudflare Worker relay
-once did exactly that for eventbrite and was removed. Instead the source is parked
-in `config.py` and its domain goes in `fetch.DENIED_DOMAINS`, which the fetcher
+A refusal is an answer, and we take it as given. Every request carries one
+User-Agent — `events-pipeline/<version> (+<contact URL>)`, the contact URL being
+the operator's imprint, which names the collector and says how to stop it — and
+there is no browser User-Agent, no header set imitating one, and no per-source
+override anywhere in the code. A Cloudflare Worker relay once routed eventbrite
+around its block, and three adapters claimed to be Chrome; all of that is gone.
+A site that refuses us, or whose robots.txt or terms rule us out, has its source
+switched off in `sources.py`; that puts its domains on the list `fetch.is_denied`
 checks before every request, so neither the adapter nor the image scan nor the
-link check contacts it again (not even for robots.txt). Currently denied:
-tip-berlin, eventbrite, rausgegangen, livegigs, the two Tribe comedy venues, and
-ticketmaster.de's event pages (the Discovery API is a different host). A source
-comes back only with the site's permission or a feed it offers.
+link check contacts it again (not even for robots.txt).
+
+**robots.txt** is checked before every request, by every caller — adapters, the
+image scan, the link check, the image check. There is no flag to skip it. A
+`Crawl-delay` the site asks for overrides a shorter interval of ours. A
+robots.txt that cannot be read (403, 429, 5xx, network error) means the host is
+treated as disallowed for that run and counted as a refusal; a missing one (404)
+means no rules. The only exemptions are two documented public APIs whose
+site-wide robots.txt is written for page crawlers, listed in
+`fetch.ROBOTS_EXEMPT_APIS` (Wikimedia Commons' `api.php`, Overpass's interpreter).
 
 New refusals stay visible: the source health step prints a warning for every
 source in `blocked_sources` and the circuit breaker gives up on a refusing host
@@ -237,8 +251,11 @@ slower run, dedup clusters recompute. The
 slowest to rebuild is the image-scan ledger (~150 pages/run), which affects
 coverage, not correctness.
 
-Secrets: `TICKETMASTER_KEY` and the `R2_*` set. (`ANTHROPIC_API_KEY` is no longer read
-and can be deleted.)
+Secrets: `TICKETMASTER_KEY`, the `R2_*` set, and optionally `SUPPRESSIONS`
+(private takedown entries). Variables: `PERMITTED_SOURCES` (sources that have
+given permission), `STOCK_PHOTOS` (`1` to publish Commons stand-ins),
+`SCRAPE_LIMIT`. (`ANTHROPIC_API_KEY`, `FETCH_PROXY_URL` and `FETCH_PROXY_TOKEN`
+are no longer read and can be deleted.)
 
 Sources fetch concurrently (one thread per adapter, own SQLite connection each);
 per-domain politeness is enforced globally by domain locks in the shared fetcher,
@@ -266,14 +283,14 @@ robots-checked, ~150 pages/run) and the best image is pulled from JSON-LD →
 `og:image`/`twitter:image` → largest content `<img>` inside `article`/`main`
 (logo/icon/SVG names rejected, sub-200px images rejected). A found image is applied
 to every event sharing that URL (recurring exhibitions), so coverage compounds across
-runs. RA flyers come straight from its GraphQL `images[]` field — no scanning.
+runs. Images are hotlinked, never copied; a photo credit is published where the
+source supplies one (Ticketmaster's `attribution`).
 
 ### Dead-link removal
 
 Feed events' source links are re-verified every ~3 days (~250 checks/run, HEAD with
 GET confirmation). Only hard 404/410 counts — blocks (403/429), server errors, and
-timeouts are inconclusive, and ra.co is never checked (it blocks non-browser clients;
-its GraphQL API is the liveness signal there). An event is pulled from the feed after
+timeouts are inconclusive, and a page robots.txt disallows is not probed at all. An event is pulled from the feed after
 **two** dead strikes ≥20 h apart; it's flagged (`link_dead_at`), not deleted, and if it
 headed a dedup cluster a surviving source is promoted so the event stays listed.
 
@@ -294,31 +311,64 @@ client's hardcoded fallback image, which is how one disco ball came to illustrat
 German courses and library readings. It also hotlinked CC images without
 per-image attribution, the caveat `placeholders.py` had flagged as unresolved.
 
-`stock_photos.py` remains the real answer for the gap: a Commons photo *of the
-venue*, properly attributed. Its budget is 1000 events per run — 250 took 2m33s
-of a 37-minute run against a 75-minute limit, and all 250 resolved, so the
-ceiling was the budget rather than Commons.
+`stock_photos.py` can fill the gap with a Wikimedia Commons photo, and is **off
+by default** (`PIPELINE_STOCK_PHOTOS=1` turns it on). Those photos are mostly
+CC BY / CC BY-SA: showing one without its author, its licence and a link to both
+puts it out of licence, and Gobento shows the author's name alone, on one screen.
+Until the client renders the whole credit wherever the photo appears, the feed
+does not carry them. When it is on, the credit fields are plain text (Commons
+returns HTML) and ride on the list row as `image_attribution`.
 
 ## Data & legal posture
 
-Facts only (title/date/venue/price) except where a source's licence covers its prose
-— descriptions are carried for open-licensed sources only (CC-BY kulturdaten), and
-`description_public` gates that per event; every exported item links back to its
-original listing; honest identifying User-Agent naming this repository, so a site
-that wants us to stop has somewhere to say so — it used to carry a personal email
-and a repository URL that never existed, which made half the contact unreachable
-(browser UA only
-where a source blocks non-browser clients — RA); a site that refuses us is left
-alone, never relayed around (`fetch.DENIED_DOMAINS`); robots.txt enforced via
-Protego; per-source kill switch in `config.py`; images are hotlinked with a
-placeholder fallback (no re-hosting); Ticketmaster fields are refreshed each run,
-not archived.
+Not legal advice — an operator's reading of each source's own documents, kept
+next to the code that acts on it (`sources.py`).
+
+* **Permission first.** A source runs only if its policy says so. Open data and
+  official APIs are on; a site whose terms require written agreement is off
+  until it gives one.
+* **Honest identity, no evasion.** One identifying User-Agent with a contact
+  URL on every request; robots.txt obeyed on every request; a refusal is never
+  routed around.
+* **Only what we may republish.** Facts (title, date, venue, price) and a link
+  back for every event. Descriptions only for the sources whose licence covers
+  prose (`SourcePolicy.description`), gated once at storage and again at export.
+  Images are hotlinked, not re-hosted.
+* **Credit travels with the data.** `manifest.sources` carries each source's
+  name, licence, licence URL and credit line, keyed by a row's `source`;
+  `manifest.attribution` is the same as one sentence. A client should show the
+  source's credit wherever it shows the event.
+* **Takedowns.** `suppressions.yaml` removes one listing — or everything from
+  one organiser, venue or site — at the next export; see below.
+* **Retention.** Events are deleted once they are over, and a switched-off
+  source's events the same day. Ticketmaster fields are refreshed each run, not
+  archived.
+
+### Takedowns
+
+Add an entry to `suppressions.yaml` and run the scrape workflow:
+
+```yaml
+events:
+  - value: <feed event id>        # one listing
+domains:
+  - value: organiser.example      # everything linking to this site
+venues:
+  - value: Example Hall           # everything at this venue
+```
+
+`urls:` (exact, or a prefix ending in `*`) and `titles:` (contains) work the
+same way. The event leaves the feed, the manifest and the demo export on that
+run, and its detail object is deleted from the bucket immediately instead of
+after the 48-hour grace. A list that fails to parse stops the export. The file
+is public; entries that would expose the requester go in the
+`PIPELINE_SUPPRESSIONS` secret instead (same YAML, merged).
 
 ### Contact stripping
 
 Roughly one kulturdaten description in ten ends with a booking line carrying a real
 person's phone number or address — council staff, a named organiser, a private
-mobile. A CC-BY licence covers republishing the text; it is not a basis for
+mobile. Permission to republish the text is not a basis for
 re-publishing someone's contact details at a new address, and the data is German, so
 GDPR applies. `redact.py` strips addresses and phone numbers from `title` and
 `description` in `export.py:_row_to_item` — the one point where a stored row becomes

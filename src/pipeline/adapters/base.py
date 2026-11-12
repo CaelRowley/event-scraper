@@ -1,5 +1,7 @@
 """Adapter contract. One module per source; adapters yield RawEvents and never talk
-to the network except through the shared Fetcher (which owns rate limiting)."""
+to the network except through the shared Fetcher, which owns rate limiting, the
+robots.txt check and the User-Agent — an adapter can set none of the three aside.
+Whether a source runs at all is decided in `sources.py`, not here."""
 
 from __future__ import annotations
 
@@ -7,7 +9,7 @@ import logging
 import re
 from collections.abc import Iterator
 
-from ..fetch import DEFAULT_UA, Fetcher, RateSpec
+from ..fetch import Fetcher, RateSpec
 from ..models import RawEvent
 
 log = logging.getLogger(__name__)
@@ -31,7 +33,6 @@ class SourceAdapter:
     slug: str = ""
     category_prior: str | None = None  # vertical sources: every event gets this category
     rate: RateSpec = RateSpec()
-    user_agent: str = DEFAULT_UA
     cheap_delta: bool = False  # included in `--mode delta` (midday) runs
 
     def __init__(self, fetcher: Fetcher, conn):
@@ -49,7 +50,7 @@ class SourceAdapter:
     # --- helpers ---------------------------------------------------------------
 
     def get(self, url: str, **kw):
-        return self.fetcher.get(url, rate=self.rate, user_agent=self.user_agent, **kw)
+        return self.fetcher.get(url, rate=self.rate, **kw)
 
     def post(self, url: str, **kw):
-        return self.fetcher.post(url, rate=self.rate, user_agent=self.user_agent, **kw)
+        return self.fetcher.post(url, rate=self.rate, **kw)

@@ -1,12 +1,15 @@
 """Fetch layer: httpx + hishel RFC-9111 cache, robots gate, per-domain rate limit, retries.
 
-Rate limiting lives here and only here — adapters declare a RateSpec but cannot bypass
-the per-domain bucket.
+Politeness lives here and only here. Adapters declare a RateSpec but cannot
+bypass the per-domain bucket, cannot change the User-Agent, and cannot skip
+robots.txt: every request is identified as this collector and checked against
+the host's rules before it is sent.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -23,80 +26,53 @@ from tenacity import (
     wait_exponential,
 )
 
+from . import __version__, sources
+
 log = logging.getLogger(__name__)
 
-DEFAULT_UA = "events-pipeline/0.1 (+https://github.com/CaelRowley/event-scraper)"
+# Who we say we are, on every request, to every host. One identity: there is no
+# per-source override and no browser User-Agent anywhere in this codebase. The
+# contact URL is the operator's imprint, which names this collector and says how
+# to make it stop — so a site that minds us has somewhere to say so.
+CONTACT_URL = os.environ.get("PIPELINE_CONTACT_URL", "https://gobento.clorostica.com/impressum")
+USER_AGENT = f"events-pipeline/{__version__} (+{CONTACT_URL})"
 
 # Hard per-request caps. httpx's read timeout is per-chunk, so a server trickling
 # bytes can hold a request open for many minutes — observed costing ~36 min/run in CI.
 MAX_RESPONSE_SECONDS = 60.0
 MAX_RESPONSE_BYTES = 10 * 1024 * 1024
-BROWSER_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
 
-# The headers a real Chrome 131 sends alongside that User-Agent. Claiming to be a
-# browser while sending none of these is trivially detectable — a bot filter does
-# not need to fingerprint TLS to notice that "Chrome" forgot `Sec-Ch-Ua`. Sent
-# only for sources that opted into BROWSER_UA; the honest bot UA keeps its own
-# minimal, truthful header set.
-#
-# Accept-Encoding is deliberately absent: httpx negotiates it against what it can
-# actually decode, and advertising `br, zstd` we cannot unpack breaks the body.
-BROWSER_HEADERS = {
-    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
-               "image/avif,image/webp,image/apng,*/*;q=0.8,"
-               "application/signed-exchange;v=b3;q=0.7"),
-    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Linux"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
+# robots.txt governs every request this module sends. The one exception is a
+# documented public API whose own usage policy is the rule and whose site-wide
+# robots.txt is written for page crawlers: Wikimedia's blocks `/w/` wholesale,
+# while its API etiquette asks only for an identifying User-Agent (which we
+# send). Matched as exact host + path prefix; nothing else is exempt, and an
+# adapter cannot add to this list at call time.
+ROBOTS_EXEMPT_APIS = {
+    "commons.wikimedia.org": "/w/api.php",
+    # Overpass: robots.txt disallows `/api/` to crawlers; the interpreter is the
+    # public query API, used here for a one-off venue bootstrap under its usage policy.
+    "overpass-api.de": "/api/interpreter",
 }
 
-
-def _browser_headers(user_agent: str | None, extra: dict) -> dict:
-    """Caller headers, plus Chrome's companions when the caller claims to be Chrome.
-
-    The caller's own keys win: an adapter asking for `Accept: application/json`
-    means it, and the JSON APIs behind these WAFs would rightly reject a request
-    that says it wants HTML.
-    """
-    headers = dict(BROWSER_HEADERS) if user_agent == BROWSER_UA else {}
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    headers.update(extra)
-    return headers
-
-
-# Sites that have told this scraper no — a WAF refusing every request from our
-# runner, or robots.txt disallowing what the adapter needs. Nothing contacts them:
-# not their adapter, not the image scan, not the link check. We do not route
-# around a refusal (a relay through other IPs used to do that for eventbrite);
-# a site that blocks us is a site we leave alone. Matched as the domain or any
-# subdomain, so this covers every host the site serves pages from.
-#
-# Their adapters are parked in config.py, not deleted. To bring one back, get
-# the site's permission (or a feed/API), then remove it here and re-enable it.
-DENIED_DOMAINS = frozenset({
-    "tip-berlin.de",         # WAF 403s every event page from GitHub's IP ranges
-    "eventbrite.de",         # refuses GitHub's IPs; only ever reached via the relay
-    "eventbrite.com",
-    "rausgegangen.de",       # robots.txt disallows the event sitemap
-    "ticketmaster.de",       # event pages 403 the runner; the Discovery API is separate
-    "livegigs.de",           # refuses GitHub's IPs
-    "comedyinenglish.de",    # refuses GitHub's IPs
-    "comedycafeberlin.com",  # refuses GitHub's IPs
-})
+# What `_robots` holds for a host whose robots.txt could not be read (server
+# error, refusal, network failure). RFC 9309 says to assume everything is
+# disallowed in that case; a missing file (404) means no rules at all.
+_UNREACHABLE = object()
 
 
 def is_denied(url: str) -> bool:
+    """Whether this URL belongs to a site we do not contact.
+
+    A site that refuses the collector, forbids it in its terms, or disallows it
+    in robots.txt has said no, and we do not route around a refusal. Its source
+    is switched off in `sources.py`, and that is what puts its domains here —
+    matched as the domain or any subdomain — so the adapter, the image scan and
+    the link check all leave it alone, robots.txt included. A source comes back
+    only with the site's permission (`PIPELINE_PERMITTED_SOURCES`).
+    """
     host = (urlsplit(url).hostname or "").lower()
-    return any(host == d or host.endswith("." + d) for d in DENIED_DOMAINS)
+    return any(host == d or host.endswith("." + d) for d in sources.denied_domains())
 
 
 # A host that refuses this many requests in a row is not asked again for the rest
@@ -157,10 +133,10 @@ def _retryable(exc: BaseException) -> bool:
 
 
 class Fetcher:
-    """One instance per run, shared across adapters. Honest UA by default; per-request override."""
+    """One instance per run, shared across adapters. One honest User-Agent for everything."""
 
-    def __init__(self, cache_path: str | None = "data/http_cache.db", user_agent: str = DEFAULT_UA):
-        headers = {"User-Agent": user_agent, "Accept-Language": "de-DE,de;q=0.9,en;q=0.7"}
+    def __init__(self, cache_path: str | None = "data/http_cache.db"):
+        headers = {"User-Agent": USER_AGENT, "Accept-Language": "de-DE,de;q=0.9,en;q=0.7"}
         if cache_path:
             import hishel
             from hishel.httpx import SyncCacheClient
@@ -175,11 +151,10 @@ class Fetcher:
             self.client = httpx.Client(headers=headers, timeout=30.0, follow_redirects=True)
         self._last_request: dict[str, float] = {}
         # _robots is unlocked by choice: a race costs at most one duplicate robots.txt GET
-        self._robots: dict[str, Protego | None] = {}
+        self._robots: dict[str, object] = {}
         self._locks_guard = threading.Lock()
         self._domain_locks: dict[str, threading.Lock] = {}
         self._counter_lock = threading.Lock()
-        self.default_ua = user_agent
         self.requests_made = 0
         # Per-source response tallies, keyed by thread name — the runner names each
         # adapter thread after its slug, so attribution costs nothing here. robots.txt
@@ -203,10 +178,12 @@ class Fetcher:
         # Different domains hold different locks and never block each other.
         # (Retry backoff and Retry-After sleeps run outside this lock, as before.)
         domain = urlsplit(url).netloc
+        # A Crawl-delay the site asks for wins over a shorter interval of ours.
+        interval = max(rate.min_interval, self._crawl_delay(domain))
         with self._domain_lock(domain):
             last = self._last_request.get(domain)
             if last is not None:
-                wait = rate.min_interval + random.uniform(*rate.jitter) - (time.monotonic() - last)
+                wait = interval + random.uniform(*rate.jitter) - (time.monotonic() - last)
                 if wait > 0:
                     time.sleep(wait)
             self._last_request[domain] = time.monotonic()
@@ -241,24 +218,56 @@ class Fetcher:
         with self._counter_lock:
             return {name: dict(counts) for name, counts in self._source_http.items()}
 
-    def _robots_for(self, url: str) -> Protego | None:
+    def _robots_for(self, url: str):
+        """Parsed rules for the URL's host, None when it has none, or `_UNREACHABLE`."""
         domain = urlsplit(url).netloc
         if domain not in self._robots:
             robots_url = f"{urlsplit(url).scheme}://{domain}/robots.txt"
             try:
                 resp = self.client.get(robots_url)
-                self._robots[domain] = Protego.parse(resp.text) if resp.status_code == 200 else None
             except httpx.HTTPError:
-                self._robots[domain] = None
+                self._robots[domain] = _UNREACHABLE
+            else:
+                if resp.status_code == 200:
+                    self._robots[domain] = Protego.parse(resp.text)
+                elif resp.status_code in (401, 403, 429) or resp.status_code >= 500:
+                    # Refused or broken: we cannot know the rules, so we assume
+                    # the strictest ones for this run rather than the loosest.
+                    log.warning("robots.txt for %s answered %d — treating the host as "
+                                "disallowed for this run", domain, resp.status_code)
+                    self._robots[domain] = _UNREACHABLE
+                else:
+                    self._robots[domain] = None  # no robots.txt: no rules
         return self._robots[domain]
 
-    def allowed(self, url: str, user_agent: str | None = None) -> bool:
+    def _crawl_delay(self, domain: str) -> float:
+        """Seconds the host's robots.txt asks between requests; 0 if it asks nothing.
+
+        Reads only what a request already loaded — it never fetches robots.txt
+        itself, so it costs nothing and cannot contact a host by accident.
+        """
+        rp = self._robots.get(domain)
+        if not isinstance(rp, Protego):
+            return 0.0
+        try:
+            return float(rp.crawl_delay(USER_AGENT) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def allowed(self, url: str) -> bool:
+        """Whether robots.txt lets this collector fetch the URL."""
         if is_denied(url):
             return False  # not even robots.txt
+        parts = urlsplit(url)
+        prefix = ROBOTS_EXEMPT_APIS.get((parts.hostname or "").lower())
+        if prefix and parts.path.startswith(prefix):
+            return True
         rp = self._robots_for(url)
         if rp is None:
             return True
-        return rp.can_fetch(url, user_agent or self.default_ua)
+        if rp is _UNREACHABLE:
+            return False
+        return rp.can_fetch(url, USER_AGENT)
 
     # --- requests --------------------------------------------------------------
 
@@ -301,32 +310,31 @@ class Fetcher:
             resp.raise_for_status()
         return resp
 
-    def get(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
-            check_robots: bool = True, **kwargs) -> httpx.Response:
+    def _request(self, method: str, url: str, rate: RateSpec, kwargs: dict) -> httpx.Response:
         self._guard(url)
-        if check_robots and not self.allowed(url, user_agent):
+        if not self.allowed(url):
+            if self._robots.get(urlsplit(url).netloc) is _UNREACHABLE:
+                # The host would not even show us its rules. That is a refusal,
+                # so it is tallied as one: a source that only ever gets this far
+                # is reported as blocked rather than passing for a quiet one.
+                with self._counter_lock:
+                    self._source_http[threading.current_thread().name]["blocked"] += 1
+                raise HostBlockedError(f"robots.txt unavailable for {url}")
             raise PermissionError(f"robots.txt disallows {url}")
         self._throttle(url, rate)
-        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
-        return self._send("GET", url, headers=headers, **kwargs)
+        headers = dict(kwargs.pop("headers", None) or {})
+        # The client's own User-Agent is the only one; a caller cannot replace it.
+        headers = {k: v for k, v in headers.items() if k.lower() != "user-agent"}
+        return self._send(method, url, headers=headers, **kwargs)
 
-    def head(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
-             check_robots: bool = True, **kwargs) -> httpx.Response:
-        self._guard(url)
-        if check_robots and not self.allowed(url, user_agent):
-            raise PermissionError(f"robots.txt disallows {url}")
-        self._throttle(url, rate)
-        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
-        return self._send("HEAD", url, headers=headers, **kwargs)
+    def get(self, url: str, *, rate: RateSpec = RateSpec(), **kwargs) -> httpx.Response:
+        return self._request("GET", url, rate, kwargs)
 
-    def post(self, url: str, *, rate: RateSpec = RateSpec(), user_agent: str | None = None,
-             check_robots: bool = True, **kwargs) -> httpx.Response:
-        self._guard(url)
-        if check_robots and not self.allowed(url, user_agent):
-            raise PermissionError(f"robots.txt disallows {url}")
-        self._throttle(url, rate)
-        headers = _browser_headers(user_agent, kwargs.pop("headers", {}))
-        return self._send("POST", url, headers=headers, **kwargs)
+    def head(self, url: str, *, rate: RateSpec = RateSpec(), **kwargs) -> httpx.Response:
+        return self._request("HEAD", url, rate, kwargs)
+
+    def post(self, url: str, *, rate: RateSpec = RateSpec(), **kwargs) -> httpx.Response:
+        return self._request("POST", url, rate, kwargs)
 
     def close(self) -> None:
         self.client.close()

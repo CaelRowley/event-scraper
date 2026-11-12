@@ -24,15 +24,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from . import config as cfg
+from . import sources as policy
 from .categorise.rules import classify_best_effort
 from .db import connect, reconcile_occurrences, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
-from .retention import prune_past
+from .retention import prune_past, purge_unpermitted
 from .fetch import Fetcher, HostBlockedError
 from .images import backfill_images
 from .linkcheck import check_images, check_links
-from .stock_photos import backfill_stock_photos
+from .stock_photos import backfill_stock_photos, stock_enabled
 from .verify import run_sanity_checks
 from .normalise.convert import to_event
 from .venues import VenueIndex, seed_venues
@@ -179,6 +180,11 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
                 tripped_sources.add(r.slug)
     scrape_seconds = round(time.monotonic() - started, 1)
 
+    # Before dedup: what a switched-off source left behind goes now, not when it
+    # ages out, and clusters it headed re-form around the members that remain.
+    purge_stats = purge_unpermitted(conn, city.slug)
+    conn.commit()
+
     dedup_stats = run_dedup(conn, city.slug)
     conn.commit()
 
@@ -194,8 +200,10 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     # Last of the image phases, deliberately: it fills only what both the source
     # and the page scan failed to provide, and `check_images` above can null an
     # image_url it finds dead — which creates work for this.
-    stock_stats = phase("stock_photos",
-                        lambda: backfill_stock_photos(conn, city.slug, fetcher=fetcher))
+    # Off unless PIPELINE_STOCK_PHOTOS is set — see stock_photos.py for why.
+    stock_stats = (phase("stock_photos",
+                         lambda: backfill_stock_photos(conn, city.slug, fetcher=fetcher))
+                   if stock_enabled() else {"skipped": "disabled"})
     sanity_stats = phase("sanity", lambda: run_sanity_checks(conn, city.slug))
 
     export_stats = export_city(conn, city.slug, cfg.PUBLIC_DIR)
@@ -231,6 +239,9 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "source_http": source_http,
         "blocked_sources": blocked_sources,
         "tripped_hosts": fetcher.tripped_hosts(),
+        # What policy kept out of this run: sources waiting for permission, and
+        # what was deleted of theirs. Takedowns are counted under `export`.
+        "policy": {"withheld_sources": policy.unpermitted_slugs(), "purged": purge_stats},
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,

@@ -219,6 +219,8 @@ def _fill_head_from_members(conn, head_id: str, member_ids: list[str]) -> None:
         for col in ("image_url", "lat", "lon", "venue_id"):
             if head[col] in (None, "") and m[col] not in (None, "") and col not in updates:
                 updates[col] = m[col]
+                if col == "image_url" and "image_credit" in m.keys():
+                    updates["image_credit"] = m["image_credit"]  # the photo's credit travels with it
         if (head["price_json"] or "").find('"type": "unknown"') >= 0 and m["price_json"] and \
            m["price_json"].find('"type": "unknown"') < 0 and "price_json" not in updates:
             updates["price_json"] = m["price_json"]

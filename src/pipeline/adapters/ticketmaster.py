@@ -1,7 +1,17 @@
 """Ticketmaster Discovery API — official free key (5,000 calls/day, 5 req/s, size*page<1000).
 
-ToS forbids caching beyond reasonable periods → we store minimal fields and refresh
-every run. Supplement only: Eventim dominates German ticketing and is closed.
+Developer Terms of Use (last updated 2023-06-27, read 2026-11-12), and what we do
+about each clause that touches this adapter:
+
+* "Cache or store any Event Content other than for reasonable periods" — minimal
+  fields only, refreshed every full run, deleted once the event is over (retention.py).
+* "Remove ... within 24 hours any Event Content ... that the owner asks you to
+  remove" — suppressions.yaml, applied at export.
+* Every event links to its Ticketmaster page (`url`), unmodified; with an
+  affiliate publisher id on the developer account that link carries the tracking.
+* The image object's `attribution` is published as the photo credit when present.
+
+Supplement only: Eventim dominates German ticketing and has no public API.
 Skips itself cleanly when TICKETMASTER_KEY is unset.
 """
 
@@ -45,7 +55,7 @@ class TicketmasterAdapter(SourceAdapter):
         }
         yielded = 0
         while params["page"] * params["size"] < 1000:  # documented deep-paging cap
-            resp = self.get(API, params=params, check_robots=False)
+            resp = self.get(API, params=params)
             if resp.status_code == 401:
                 log.error("ticketmaster: key rejected")
                 return
@@ -87,7 +97,8 @@ class TicketmasterAdapter(SourceAdapter):
             price_text = (f"{price_min:g}–{price_max:g} €"
                           if price_max and price_max != price_min else f"{price_min:g} €")
         images = entry.get("images") or []
-        image = next((i.get("url") for i in sorted(images, key=lambda i: -(i.get("width") or 0))), None)
+        best = next(iter(sorted(images, key=lambda i: -(i.get("width") or 0))), None) or {}
+        image = best.get("url")
 
         def _coord(v):
             try:
@@ -111,6 +122,7 @@ class TicketmasterAdapter(SourceAdapter):
             price_text=price_text,
             price_value=price_min if price_min == price_max else None,
             image_url=image,
+            image_credit=best.get("attribution") if image else None,
             category_raw=f"{segment}|{genre}" if segment else None,
             event_status="cancelled" if dates.get("dateTBD") is False and
                           (entry.get("dates", {}).get("status", {}).get("code") == "cancelled")
