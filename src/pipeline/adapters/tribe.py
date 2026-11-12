@@ -16,7 +16,7 @@ import re
 from collections.abc import Iterator
 from datetime import date, timedelta
 
-from ..fetch import BROWSER_UA, RateSpec
+from ..fetch import RateSpec
 from ..models import RawEvent
 from .base import SourceAdapter
 
@@ -139,13 +139,12 @@ class ComedyInEnglishAdapter(TribeEventsAdapter):
 
 
 class ComedyCafeAdapter(TribeEventsAdapter):
-    """Comedy Café Berlin — improv/stand-up. Cloudflare-fronted, so use a browser UA."""
+    """Comedy Café Berlin — improv/stand-up. OFF until the venue agrees (`sources.py`)."""
 
     slug = "comedy_cafe"
     category_prior = "comedy"
     base_url = "https://www.comedycafeberlin.com"
     house_venue = "Comedy Café Berlin"
-    user_agent = BROWSER_UA
 
 
 class PrinzipalKreuzbergAdapter(TribeEventsAdapter):

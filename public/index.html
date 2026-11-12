@@ -75,6 +75,7 @@
 <footer>
   Demo for the event-scraper pipeline. Every card links to the original listing — data remains
   the property of its sources. Generated from <code>berlin/index.json</code>.
+  <div id="credits"></div>
 </footer>
 <script>
 const ICONS = {
@@ -109,6 +110,16 @@ async function load() {
   DATA = await res.json();
   document.getElementById("meta").textContent =
     `${DATA.meta.total} events · ${DATA.meta.window.from} → ${DATA.meta.window.to} · generated ${DATA.meta.generated_at}`;
+  // Each source's credit line, with its licence where it names one (sources.py).
+  const credits = document.getElementById("credits");
+  for (const c of Object.values(DATA.meta.sources || {})) {
+    const line = document.createElement("div");
+    const a = document.createElement("a");
+    a.href = c.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = c.attribution;
+    line.append(a);
+    if (c.licence) line.append(` — ${c.licence}`);
+    credits.append(line);
+  }
   buildChips();
   render();
 }

@@ -27,21 +27,24 @@ CITIES = {
     "berlin": CityConfig(
         slug="berlin",
         tz="Europe/Berlin",
+        # Every source the city has an adapter for. Which of them actually run
+        # is not decided here: `sources.py` holds each one's verdict, and only a
+        # permitted source is selected (see select_adapters). Today that is
+        # kulturdaten, berlin_de, vhs, prinzipal and ticketmaster; the rest wait for
+        # their site's written permission and PIPELINE_PERMITTED_SOURCES.
         sources=[
             "kulturdaten",
             "berlin_de",
-            "ra",
+            "vhs",
             "prinzipal",
             "ticketmaster",
-            # Off the list, not deleted: tip_berlin, eventbrite, livegigs,
-            # comedy_in_english and comedy_cafe refuse this scraper's requests,
-            # and rausgegangen's robots.txt disallows its event sitemap. We take
-            # a refusal as an answer rather than routing around it, so their
-            # domains are in fetch.DENIED_DOMAINS and nothing contacts them.
-            #
-            # The adapters still work against the sites as they are. Bring one
-            # back only with the site's permission (or a feed/API it offers):
-            # drop its domain from DENIED_DOMAINS and re-add it here.
+            "ra",
+            "tip_berlin",
+            "livegigs",
+            "comedy_in_english",
+            "comedy_cafe",
+            "rausgegangen",
+            "eventbrite",
         ],
     ),
 }
@@ -51,7 +54,12 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
                     only: list[str] | None = None) -> list[tuple[str, type]]:
     """(slug, adapter_class) pairs. Construction is deferred so each runner worker
     can instantiate on its own thread-local connection (adapter __init__ runs DDL).
-    mode=delta → cheap-delta sources only."""
+    mode=delta → cheap-delta sources only.
+
+    A source that `sources.py` does not permit is never selected — naming it
+    with `--source` does not override that; only its policy or
+    PIPELINE_PERMITTED_SOURCES does."""
+    from . import sources as policy
     from .adapters.berlin_de import BerlinDeAdapter
     from .adapters.eventbrite import EventbriteAdapter
     from .adapters.jsonld_sitemap import RausgegangenAdapter, TipBerlinAdapter
@@ -59,6 +67,7 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
     from .adapters.livegigs import LivegigsAdapter
     from .adapters.ra import ResidentAdvisorAdapter
     from .adapters.ticketmaster import TicketmasterAdapter
+    from .adapters.vhs import VhsAdapter
     from .adapters.tribe import (
         ComedyCafeAdapter,
         ComedyInEnglishAdapter,
@@ -68,6 +77,7 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
     registry = {
         "kulturdaten": KulturdatenAdapter,
         "berlin_de": BerlinDeAdapter,
+        "vhs": VhsAdapter,
         "ra": ResidentAdvisorAdapter,
         "livegigs": LivegigsAdapter,
         "rausgegangen": RausgegangenAdapter,
@@ -81,6 +91,8 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
     selected = []
     for slug in city.sources:
         if only and slug not in only:
+            continue
+        if not policy.is_permitted(slug):
             continue
         cls = registry[slug]
         if mode == "delta" and not cls.cheap_delta:

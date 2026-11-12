@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+import pytest
 
 import pipeline.config as cfg
 import pipeline.runner as runner_mod
@@ -20,9 +21,20 @@ from pipeline.adapters.base import SourceAdapter
 from pipeline.runner import run
 
 
+def _no_robots(handler):
+    """Answer robots.txt with 404 (no rules), everything else with `handler` —
+    the fetcher consults robots.txt before every request, with no way to skip it."""
+    def wrapped(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return handler(request)
+    return wrapped
+
+
 def _fetcher(handler):
     f = Fetcher(cache_path=None)
-    f.client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    f.client = httpx.Client(transport=httpx.MockTransport(_no_robots(handler)),
+                            follow_redirects=True)
     return f
 
 
@@ -37,7 +49,7 @@ def test_same_domain_requests_serialize_across_threads():
     rate = RateSpec(min_interval=0.15, jitter=(0, 0))
 
     def hit():
-        fetcher.get("https://one.example/x", rate=rate, check_robots=False)
+        fetcher.get("https://one.example/x", rate=rate)
 
     threads = [threading.Thread(target=hit) for _ in range(3)]
     for t in threads:
@@ -59,7 +71,7 @@ def test_cross_domain_requests_run_in_parallel():
     t0 = time.monotonic()
 
     def hit(domain):
-        fetcher.get(f"https://{domain}/x", rate=rate, check_robots=False)
+        fetcher.get(f"https://{domain}/x", rate=rate)
 
     threads = [threading.Thread(target=hit, args=(d,))
                for d in ("a.example", "b.example", "c.example")]
@@ -78,7 +90,7 @@ def test_requests_made_counter_is_exact_under_threads():
 
     def hit(i):
         for j in range(25):
-            fetcher.get(f"https://d{i}.example/{j}", rate=rate, check_robots=False)
+            fetcher.get(f"https://d{i}.example/{j}", rate=rate)
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(hit, range(8)))
@@ -155,6 +167,14 @@ def test_ledger_put_never_leaves_a_transaction_open(tmp_path):
     assert ledger_get(b, "test", "https://x.example/p") is not None
     a.close()
     b.close()
+
+
+@pytest.fixture(autouse=True)
+def _permit_the_fake_sources(monkeypatch):
+    """A source without a policy is not published (sources.py), and what it
+    stored is purged — so the fake sources below are permitted the way a real one
+    is once its site has agreed: by name, in PIPELINE_PERMITTED_SOURCES."""
+    monkeypatch.setenv("PIPELINE_PERMITTED_SOURCES", "fake_ok,fake_boom,fake_tripped")
 
 
 class FakeAdapterOK(SourceAdapter):

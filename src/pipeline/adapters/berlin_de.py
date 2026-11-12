@@ -3,8 +3,11 @@
 Verified 2026-06-10 under /sen/web/service/maerkte-feste/ (the /land/kalender/ paths 404):
   strassen-volksfeste …/index.php/index/all.json?q=   → 69 items
   weihnachtsmaerkte   …/index.php/index/all.json?q=   → 48 items
-Open data (CC-BY/DL-DE). berlin.de robots.txt requires a uniquely identifying UA —
-the fetcher's default UA carries project URL + contact email.
+Both lists are Berlin Open Data datasets registered as `cc-by` (author:
+Senatsverwaltung für Wirtschaft, Energie und Betriebe; read from the data registry
+2026-11-12), so their opening-times and remarks text is published with that credit.
+berlin.de's robots.txt carries terms for automated clients: identify uniquely in the
+User-Agent and obey the Robots Exclusion Protocol. The fetcher does both.
 """
 
 from __future__ import annotations
@@ -33,6 +36,9 @@ ENDPOINTS = {
         "postal": "plz_ort",
     },
 }
+
+
+_CONTACT_KEYS = frozenset({"mail", "email", "veranstalter", "telefon", "tel", "fax"})
 
 
 class BerlinDeAdapter(SourceAdapter):
@@ -84,7 +90,10 @@ class BerlinDeAdapter(SourceAdapter):
             description=" ".join(
                 filter(None, [zeit, (item.get("bemerkungen") or "").strip()])
             ) or None,
-            payload=dict(item),
+            description_public=True,  # cc-by open data — published with its credit
+            # The lists carry the operators' names and email addresses. We publish
+            # neither, so we do not keep them either.
+            payload={k: v for k, v in item.items() if k not in _CONTACT_KEYS},
         )
 
     def map_category(self, raw: RawEvent) -> str | None:

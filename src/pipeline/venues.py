@@ -166,7 +166,6 @@ def bootstrap_from_overpass(conn, fetcher) -> int:
     """One-off Overpass pull of Berlin venue POIs (ODbL — attribute if redistributed)."""
     resp = fetcher.post(
         "https://overpass-api.de/api/interpreter", data={"data": OVERPASS_QUERY},
-        check_robots=False,
     )
     resp.raise_for_status()
     added = 0

@@ -214,6 +214,11 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     # Only now — every object the new manifest names is in place.
     _put(s3, bucket, manifest_key, manifest_path)
 
+    # Takedowns do not wait out the grace window: the manifest above no longer
+    # names them, and a removal request is not served by the description staying
+    # fetchable for two more days.
+    taken_down = _delete_taken_down(s3, bucket, city, city_dir, existing)
+
     deleted = 0
     prune_skipped = None
     if prune:
@@ -229,7 +234,36 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     log.info("published %s: %d uploaded, %d already current, %d pruned",
              city, uploaded, len(local) - len(todo) - 1, deleted)
     return {"uploaded": uploaded, "unchanged": len(local) - len(todo) - 1,
-            "pruned": deleted, "objects": len(local), "prune_skipped": prune_skipped}
+            "pruned": deleted, "objects": len(local), "prune_skipped": prune_skipped,
+            "taken_down": taken_down}
+
+
+def _delete_taken_down(s3, bucket: str, city: str, city_dir: Path,
+                       existing: dict[str, datetime]) -> int:
+    """Delete every detail object of the events the export suppressed. Returns how many.
+
+    The export leaves their ids in a local `.takedown.json`. Detail objects are
+    named `events/<id>.<hash>.json.gz`, so an id's objects are found by prefix
+    among the keys already listed. `existing` is updated so the grace-window
+    ledger does not go on to track keys that are gone.
+    """
+    from .export import TAKEDOWN_FILE
+
+    try:
+        ids = json.loads((city_dir / TAKEDOWN_FILE).read_text())
+    except (FileNotFoundError, ValueError):
+        return 0
+    prefixes = tuple(f"{city}/events/{i}." for i in ids if isinstance(i, str) and i)
+    if not prefixes:
+        return 0
+    doomed = [k for k in existing if k.startswith(prefixes)]
+    for chunk in (doomed[i:i + 1000] for i in range(0, len(doomed), 1000)):
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk]})
+    for key in doomed:
+        existing.pop(key, None)
+    if doomed:
+        log.info("takedown: deleted %d object(s) for %d suppressed event(s)", len(doomed), len(ids))
+    return len(doomed)
 
 
 def _unsafe_to_prune(manifest_path: Path, local_count: int, existing_count: int) -> str | None:

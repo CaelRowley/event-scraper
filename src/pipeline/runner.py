@@ -24,15 +24,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from . import config as cfg
+from . import sources as policy
 from .categorise.rules import classify_best_effort
 from .db import connect, reconcile_occurrences, set_category, snapshot, upsert_event
 from .dedup import run_dedup
 from .export import export_city
-from .retention import prune_past
+from .redact import redact_contacts
+from .retention import prune_linkless, prune_past, purge_unpermitted
+from .adapters.base import has_external_link
 from .fetch import Fetcher, HostBlockedError
 from .images import backfill_images
 from .linkcheck import check_images, check_links
-from .stock_photos import backfill_stock_photos
+from .stock_photos import backfill_stock_photos, stock_enabled
 from .verify import run_sanity_checks
 from .normalise.convert import to_event
 from .venues import VenueIndex, seed_venues
@@ -50,6 +53,7 @@ class AdapterResult:
     slug: str
     count: int = 0
     tier_counts: Counter = field(default_factory=Counter)
+    no_link: int = 0  # events the source offered that had no external link — not stored
     error: str | None = None
     # The source's host refused us until the circuit breaker gave up on it — a
     # block (needs a different egress IP), not a bug, so it is not an `error`.
@@ -67,6 +71,9 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
         adapter = adapter_cls(fetcher, conn)  # adapter DDL lands on this thread's conn
         log.info("=== source: %s", slug)
         for raw in adapter.fetch_events(window_days=cfg.SCRAPE_WINDOW_DAYS, limit=limit):
+            if not has_external_link(raw.source_url):
+                res.no_link += 1  # nowhere to send a reader: not converted, not stored
+                continue
             ev = to_event(raw, city.slug, city.tz)
             if ev is None:
                 continue
@@ -83,8 +90,11 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
             )
             res.count += 1
             if changed:
+                # Contact details are stripped before the text is kept, not only
+                # before it is published: nothing here needs a phone number.
                 snapshot(conn, ev.source, ev.source_event_id,
-                         {**raw.payload, "description": (ev.description or "")[:1500]})
+                         {**raw.payload,
+                          "description": (redact_contacts(ev.description)[0] or "")[:1500]})
             if cls is None:
                 res.tier_counts["unclassified"] += 1  # zero signal — stays "other"
             else:
@@ -158,6 +168,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     tier_counts: Counter = Counter()
     source_counts: Counter = Counter()
     errors: dict[str, str] = {}
+    no_link: dict[str, int] = {}
     tripped_sources: set[str] = set()
     phase_errors: dict[str, str] = {}
 
@@ -173,11 +184,19 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
             # how four blocked sources stayed invisible in a green run.
             source_counts[r.slug] = r.count
             tier_counts.update(r.tier_counts)
+            if r.no_link:
+                no_link[r.slug] = r.no_link
             if r.error:
                 errors[r.slug] = r.error
             if r.blocked:
                 tripped_sources.add(r.slug)
     scrape_seconds = round(time.monotonic() - started, 1)
+
+    # Before dedup: what a switched-off source left behind goes now, not when it
+    # ages out, and clusters it headed re-form around the members that remain.
+    purge_stats = purge_unpermitted(conn, city.slug)
+    linkless_stats = prune_linkless(conn, city.slug)
+    conn.commit()
 
     dedup_stats = run_dedup(conn, city.slug)
     conn.commit()
@@ -194,8 +213,10 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     # Last of the image phases, deliberately: it fills only what both the source
     # and the page scan failed to provide, and `check_images` above can null an
     # image_url it finds dead — which creates work for this.
-    stock_stats = phase("stock_photos",
-                        lambda: backfill_stock_photos(conn, city.slug, fetcher=fetcher))
+    # Off unless PIPELINE_STOCK_PHOTOS is set — see stock_photos.py for why.
+    stock_stats = (phase("stock_photos",
+                         lambda: backfill_stock_photos(conn, city.slug, fetcher=fetcher))
+                   if stock_enabled() else {"skipped": "disabled"})
     sanity_stats = phase("sanity", lambda: run_sanity_checks(conn, city.slug))
 
     export_stats = export_city(conn, city.slug, cfg.PUBLIC_DIR)
@@ -231,6 +252,12 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         "source_http": source_http,
         "blocked_sources": blocked_sources,
         "tripped_hosts": fetcher.tripped_hosts(),
+        # What policy kept out of this run: sources waiting for permission, and
+        # what was deleted of theirs. Takedowns are counted under `export`.
+        "policy": {"withheld_sources": policy.unpermitted_slugs(), "purged": purge_stats,
+                   # Events with no external link: skipped at the door this run,
+                   # and deleted where an earlier run had stored them.
+                   "no_link_skipped": no_link, "no_link_deleted": linkless_stats["events"]},
         "category_tiers": dict(tier_counts),
         "dedup": dedup_stats,
         "images": image_stats,

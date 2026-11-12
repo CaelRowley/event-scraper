@@ -39,9 +39,20 @@ class TrickleStream(httpx.SyncByteStream):
             yield b"x" * 16
 
 
+def _no_robots(handler):
+    """Answer robots.txt with 404 (no rules), everything else with `handler` —
+    the fetcher consults robots.txt before every request, with no way to skip it."""
+    def wrapped(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return handler(request)
+    return wrapped
+
+
 def _fetcher(handler):
     f = Fetcher(cache_path=None)
-    f.client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    f.client = httpx.Client(transport=httpx.MockTransport(_no_robots(handler)),
+                            follow_redirects=True)
     return f
 
 
@@ -56,7 +67,7 @@ def test_trickling_body_raises_stall_and_never_retries(monkeypatch):
 
     fetcher = _fetcher(handler)
     with pytest.raises(FetchStallError):
-        fetcher.get("https://slow.example/page", check_robots=False)
+        fetcher.get("https://slow.example/page")
     assert len(calls) == 1  # non-retryable: one stall costs one attempt
 
 
@@ -68,7 +79,7 @@ def test_oversized_body_raises_stall(monkeypatch):
 
     fetcher = _fetcher(handler)
     with pytest.raises(FetchStallError):
-        fetcher.get("https://big.example/page", check_robots=False)
+        fetcher.get("https://big.example/page")
 
 
 def test_normal_response_body_still_readable():
@@ -76,7 +87,7 @@ def test_normal_response_body_still_readable():
         return httpx.Response(200, json={"ok": True})
 
     fetcher = _fetcher(handler)
-    resp = fetcher.get("https://fine.example/api", check_robots=False)
+    resp = fetcher.get("https://fine.example/api")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
 
@@ -87,7 +98,7 @@ def test_head_request_works():
         return httpx.Response(204)
 
     fetcher = _fetcher(handler)
-    assert fetcher.head("https://fine.example/", check_robots=False).status_code == 204
+    assert fetcher.head("https://fine.example/").status_code == 204
 
 
 def test_retry_after_sleep_capped_at_30s(monkeypatch):
@@ -101,7 +112,7 @@ def test_retry_after_sleep_capped_at_30s(monkeypatch):
         return httpx.Response(status, headers=headers)
 
     fetcher = _fetcher(handler)
-    resp = fetcher.get("https://busy.example/", check_robots=False)
+    resp = fetcher.get("https://busy.example/")
     assert resp.status_code == 200
     assert 30 in faketime.sleeps  # capped, not the advertised 500
 
@@ -115,7 +126,7 @@ def test_throttle_spacing_same_domain(monkeypatch):
     fetcher = _fetcher(lambda request: httpx.Response(200))
     rate = RateSpec(min_interval=5, jitter=(0, 0))
     for _ in range(3):
-        fetcher.get("https://one.example/x", rate=rate, check_robots=False)
+        fetcher.get("https://one.example/x", rate=rate)
     assert faketime.sleeps == [5.0, 5.0]
 
 
@@ -124,8 +135,8 @@ def test_throttle_no_wait_across_domains(monkeypatch):
     monkeypatch.setattr(fetch_mod, "time", faketime)
     fetcher = _fetcher(lambda request: httpx.Response(200))
     rate = RateSpec(min_interval=5, jitter=(0, 0))
-    fetcher.get("https://one.example/x", rate=rate, check_robots=False)
-    fetcher.get("https://two.example/x", rate=rate, check_robots=False)
+    fetcher.get("https://one.example/x", rate=rate)
+    fetcher.get("https://two.example/x", rate=rate)
     assert faketime.sleeps == []
 
 
@@ -155,7 +166,7 @@ def _counting_fetcher(status_for):
         return httpx.Response(status_for(str(request.url)))
 
     f = Fetcher(cache_path=None)
-    f.client = httpx.Client(transport=httpx.MockTransport(handler))
+    f.client = httpx.Client(transport=httpx.MockTransport(_no_robots(handler)))
     return f, calls
 
 
@@ -165,16 +176,16 @@ FAST = RateSpec(min_interval=0.0, jitter=(0.0, 0.0))
 def test_a_host_refusing_every_request_is_given_up_on():
     f, calls = _counting_fetcher(lambda url: 403 if "waf.example" in url else 200)
     for i in range(fetch_mod.TRIP_AFTER):
-        assert f.get(f"https://waf.example/{i}", rate=FAST, check_robots=False).status_code == 403
+        assert f.get(f"https://waf.example/{i}", rate=FAST).status_code == 403
     assert f.tripped("https://waf.example/next")
     sent = len(calls)
     with pytest.raises(fetch_mod.HostBlockedError):
-        f.get("https://waf.example/next", rate=FAST, check_robots=False)
+        f.get("https://waf.example/next", rate=FAST)
     assert len(calls) == sent, "a tripped host must not be sent another request"
     # and it is a PermissionError, which adapters already treat as "stop this source"
     assert issubclass(fetch_mod.HostBlockedError, PermissionError)
     # other hosts are unaffected
-    assert f.get("https://fine.example/", rate=FAST, check_robots=False).status_code == 200
+    assert f.get("https://fine.example/", rate=FAST).status_code == 200
     assert f.tripped_hosts() == ["waf.example"]
 
 
@@ -182,12 +193,12 @@ def test_one_success_resets_the_refusal_streak():
     statuses = iter([403] * (fetch_mod.TRIP_AFTER - 1) + [200] + [403] * (fetch_mod.TRIP_AFTER - 1))
     f, _ = _counting_fetcher(lambda url: next(statuses))
     for i in range(2 * fetch_mod.TRIP_AFTER - 1):
-        f.get(f"https://flaky.example/{i}", rate=FAST, check_robots=False)
+        f.get(f"https://flaky.example/{i}", rate=FAST)
     assert not f.tripped("https://flaky.example/")
 
 
 def test_404s_never_trip_the_breaker():
     f, _ = _counting_fetcher(lambda url: 404)
     for i in range(fetch_mod.TRIP_AFTER * 2):
-        f.get(f"https://gone.example/{i}", rate=FAST, check_robots=False)
+        f.get(f"https://gone.example/{i}", rate=FAST)
     assert not f.tripped("https://gone.example/")

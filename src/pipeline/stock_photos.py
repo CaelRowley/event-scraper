@@ -24,13 +24,23 @@ Two rules carried over from that implementation, both learned the hard way:
 Licensing: Commons files are free but mostly CC-BY(-SA), which does *not* waive
 attribution. The author/licence is recorded alongside the URL and published in
 the feed so the UI can credit it.
+
+OFF by default (`PIPELINE_STOCK_PHOTOS=1` turns it on). A CC BY / BY-SA photo may
+only be shown with its author, its licence and a link to both, and the client
+this feed is built for shows the author's name alone, on one screen. Until it
+renders the whole credit wherever the photo appears, publishing these photos
+would put every one of them out of licence — so the feed does not carry them and
+an imageless event stays imageless.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
+import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -38,16 +48,31 @@ import httpx
 
 from .categorise.taxonomy import LABELS
 from .db import now_iso
-from .fetch import Fetcher, RateSpec
+from .fetch import USER_AGENT, Fetcher, RateSpec
 
 log = logging.getLogger(__name__)
 
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 IMAGE_MIME_ALLOWLIST = frozenset({"image/jpeg", "image/png", "image/webp"})
 
-# Wikimedia's API etiquette asks for an identifiable UA; generic ones get
-# throttled first.
-USER_AGENT = "events-pipeline/0.1 (+https://github.com/CaelRowley/event-scraper)"
+# Wikimedia's User-Agent policy asks for a client name plus a way to reach the
+# operator; the pipeline's one User-Agent (fetch.USER_AGENT) carries both.
+
+ENABLE_ENV = "PIPELINE_STOCK_PHOTOS"
+
+
+def stock_enabled() -> bool:
+    """Whether Commons stand-ins are resolved and published. Off unless asked for."""
+    return os.environ.get(ENABLE_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _plain(value: str) -> str:
+    """Commons hands back credit fields as HTML (`<a href=…>Name</a>`). A client
+    that prints them as text would show the markup, so they are reduced to text here."""
+    return re.sub(r"\s+", " ", html.unescape(_TAGS.sub(" ", value))).strip()
 
 # A run resolves at most this many events. A cold database has thousands of
 # imageless events and each costs up to a handful of API calls, so this is a time
@@ -156,7 +181,7 @@ def _attribution(info: dict) -> dict | None:
 
     def field(key):
         value = (meta.get(key) or {}).get("value")
-        return value.strip() if isinstance(value, str) and value.strip() else None
+        return (_plain(value) or None) if isinstance(value, str) else None
 
     artist, licence = field("Artist"), field("LicenseShortName")
     if not (artist or licence):
@@ -174,17 +199,17 @@ class _CommonsClient:
     the lookups use — so they share its RFC-9111 cache (a repeated query costs
     no request) and its retries, without every call site spelling the options.
 
-    `check_robots=False` on purpose: Commons' robots.txt disallows `/w/` for
-    crawlers, but this is the API it publishes for exactly this use. We are
-    identified to it by User-Agent as its etiquette asks.
+    Commons' robots.txt disallows `/w/` for crawlers, but this is the API it
+    publishes for exactly this use — the one documented exemption in
+    `fetch.ROBOTS_EXEMPT_APIS`. We are identified to it by User-Agent as its
+    policy asks.
     """
 
     def __init__(self, fetcher: Fetcher):
         self._fetcher = fetcher
 
     def get(self, url: str, **kwargs) -> httpx.Response:
-        return self._fetcher.get(url, rate=COMMONS_RATE, user_agent=USER_AGENT,
-                                 check_robots=False, **kwargs)
+        return self._fetcher.get(url, rate=COMMONS_RATE, **kwargs)
 
 
 def search_many(client, query: str) -> list[tuple[str, dict | None]]:

@@ -50,28 +50,9 @@ def _chunks(items: list[str], size: int = 400):
         yield items[i:i + size]
 
 
-def prune_past(conn, city: str, *, keep_days: int = RETAIN_PAST_DAYS,
-               today: date | None = None) -> dict:
-    """Remove finished events for `city`. Returns what it deleted."""
-    cutoff = ((today or date.today()) - timedelta(days=keep_days)).isoformat()
-
-    # An event with no occurrences at all is already invisible — reconcile drops
-    # the rows when a source stops reporting a slot — so it is judged on when it
-    # was last seen instead.
-    rows = conn.execute(
-        """SELECT e.id, e.source_slug, e.source_event_id
-             FROM events e
-            WHERE e.city = ?
-              AND COALESCE(
-                    (SELECT MAX(o.nightlife_date) FROM occurrences o WHERE o.event_id = e.id),
-                    date(e.last_seen_at)
-                  ) < ?""",
-        (city, cutoff),
-    ).fetchall()
-    if not rows:
-        log.info("retention: nothing finished before %s", cutoff)
-        return {"cutoff": cutoff, "events": 0, "occurrences": 0, "checks": 0}
-
+def _delete_events(conn, rows) -> tuple[int, int]:
+    """Delete these events and everything hanging off them. Returns
+    (occurrences removed, stale link/image check rows removed)."""
     ids = [r["id"] for r in rows]
     sources = [(r["source_slug"], r["source_event_id"]) for r in rows]
 
@@ -104,7 +85,90 @@ def prune_past(conn, city: str, *, keep_days: int = RETAIN_PAST_DAYS,
             ).rowcount
         except Exception:  # noqa: BLE001 — table absent on a fresh database
             pass
+    return occurrences, checks
+
+
+def purge_unpermitted(conn, city: str) -> dict:
+    """Delete every stored event of a source we are not permitted to use.
+
+    Switching a source off stops new collection, but what it already yielded
+    would otherwise sit in the database — and in the feed — until each event
+    aged out, weeks later. A source is off because its site said no (or never
+    said yes), so its data goes the same day: events, occurrences, raw
+    snapshots, and the crawl ledger rows that only that source's adapter reads.
+
+    Runs before dedup, so a cluster that was headed by a purged event re-forms
+    around the members that remain.
+    """
+    from . import sources as policy
+
+    slugs = [r["source_slug"] for r in conn.execute(
+        "SELECT DISTINCT source_slug FROM events WHERE city = ?", (city,))]
+    gone = [s for s in slugs if not policy.is_permitted(s)]
+    removed: dict[str, int] = {}
+    for slug in gone:
+        rows = conn.execute(
+            "SELECT id, source_slug, source_event_id FROM events WHERE city=? AND source_slug=?",
+            (city, slug),
+        ).fetchall()
+        _delete_events(conn, rows)
+        conn.execute("DELETE FROM raw_snapshots WHERE source_slug=?", (slug,))
+        conn.execute("DELETE FROM crawl_ledger WHERE source_slug=?", (slug,))
+        removed[slug] = len(rows)
+    if removed:
+        # Members whose head just went become their own head until dedup re-clusters.
+        conn.execute(
+            "UPDATE events SET canonical_id=id WHERE canonical_id NOT IN (SELECT id FROM events)")
+        log.warning("policy: purged events of unpermitted sources: %s", removed)
+    return {"sources": removed, "events": sum(removed.values())}
+
+
+def prune_linkless(conn, city: str) -> dict:
+    """Delete stored events that have no external link.
+
+    Nothing without one is stored any more (`has_external_link`, applied before
+    an event is converted); this removes what earlier runs kept — rows whose
+    link was empty, not a URL, or a raw kulturdaten API record.
+    """
+    from .adapters.base import has_external_link
+
+    rows = [
+        r for r in conn.execute(
+            "SELECT id, source_slug, source_event_id, source_url FROM events WHERE city=?", (city,))
+        if not has_external_link(r["source_url"])
+    ]
+    if rows:
+        _delete_events(conn, rows)
+        conn.execute(
+            "UPDATE events SET canonical_id=id WHERE canonical_id NOT IN (SELECT id FROM events)")
+        log.warning("policy: deleted %d stored event(s) with no external link", len(rows))
+    return {"events": len(rows)}
+
+
+def prune_past(conn, city: str, *, keep_days: int = RETAIN_PAST_DAYS,
+               today: date | None = None) -> dict:
+    """Remove finished events for `city`. Returns what it deleted."""
+    cutoff = ((today or date.today()) - timedelta(days=keep_days)).isoformat()
+
+    # An event with no occurrences at all is already invisible — reconcile drops
+    # the rows when a source stops reporting a slot — so it is judged on when it
+    # was last seen instead.
+    rows = conn.execute(
+        """SELECT e.id, e.source_slug, e.source_event_id
+             FROM events e
+            WHERE e.city = ?
+              AND COALESCE(
+                    (SELECT MAX(o.nightlife_date) FROM occurrences o WHERE o.event_id = e.id),
+                    date(e.last_seen_at)
+                  ) < ?""",
+        (city, cutoff),
+    ).fetchall()
+    if not rows:
+        log.info("retention: nothing finished before %s", cutoff)
+        return {"cutoff": cutoff, "events": 0, "occurrences": 0, "checks": 0}
+
+    occurrences, checks = _delete_events(conn, rows)
 
     log.info("retention: removed %d events (%d occurrences, %d stale checks) finished before %s",
-             len(ids), occurrences, checks, cutoff)
-    return {"cutoff": cutoff, "events": len(ids), "occurrences": occurrences, "checks": checks}
+             len(rows), occurrences, checks, cutoff)
+    return {"cutoff": cutoff, "events": len(rows), "occurrences": occurrences, "checks": checks}

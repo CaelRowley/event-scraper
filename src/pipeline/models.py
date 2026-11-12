@@ -47,6 +47,7 @@ class RawEvent:
     price_value: float | None = None  # structured price if source provides one
     is_free: bool | None = None
     image_url: str | None = None
+    image_credit: str | None = None  # the credit line the source gives for image_url
     category_raw: str | None = None  # whatever the source said
     schema_type: str | None = None  # JSON-LD @type
     description: str | None = None  # classification input; exported only when description_public
@@ -96,6 +97,7 @@ class Event:
     lon: float | None = None
     price: Price = field(default_factory=Price)
     image_url: str | None = None
+    image_credit: str | None = None
     occurrences: list[Occurrence] = field(default_factory=list)
     description: str | None = None  # classification input
     description_public: bool = False  # exported/stored only when True (open-licensed source)
@@ -113,6 +115,9 @@ class Event:
             # in the hash so a website discovered on a later run replaces an API-record link
             "url": self.source_url,
         }
+        # Only when there is one, so events without a credit keep the hash they had.
+        if self.image_credit:
+            basis["image_credit"] = self.image_credit
         return "sha256:" + hashlib.sha256(
             json.dumps(basis, sort_keys=True, default=str).encode()
         ).hexdigest()

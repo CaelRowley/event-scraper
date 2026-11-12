@@ -48,10 +48,17 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from . import config as cfg
+from . import sources
 from .categorise.taxonomy import LABELS
 from .db import now_iso
 from .placeholders import placeholder_url
 from .redact import contains_contact, redact_contacts
+from .stock_photos import stock_enabled
+from .suppress import Suppressions, load as load_suppressions
+
+# Local-only note of what this export withheld on request, so `publish` can
+# delete those events' objects at once instead of after the grace window.
+TAKEDOWN_FILE = ".takedown.json"
 
 # none: the client draws its own panel for an event with no photo (EventImage in
 # Gobento). LoremFlickr was the default and was worse than nothing: `art,gallery`
@@ -109,8 +116,31 @@ def _hash(payload) -> str:
 
 
 def _stock_url(row, keys) -> str | None:
-    """The Commons photo resolved for this event, if stock_photos.py found one."""
+    """The Commons photo resolved for this event, if stock_photos.py found one.
+
+    None while stock photos are switched off, even for a photo already stored: a
+    CC photo is only published where its full credit will be shown.
+    """
+    if not stock_enabled():
+        return None
     return row["stock_image_url"] if "stock_image_url" in keys else None
+
+
+def _own_image(row) -> str | None:
+    """The source's own image, if the source's policy lets us show it."""
+    return row["image_url"] if sources.may_publish_images(row["source_slug"]) else None
+
+
+def _image_attribution(row, keys, own_image: str | None) -> dict | None:
+    """Who the published photo is by.
+
+    For a source's own image, the credit line the source supplied with it
+    (Ticketmaster's `attribution`); for a Commons stand-in, author and licence.
+    """
+    if own_image:
+        credit = row["image_credit"] if "image_credit" in keys else None
+        return {"author": credit} if credit else None
+    return _stock_attribution(row, keys) if _stock_url(row, keys) else None
 
 
 def _stock_attribution(row, keys) -> dict | None:
@@ -142,7 +172,12 @@ def _row_to_item(row) -> dict:
     # re-publishing someone's contact details at a new address. Applied here so the
     # demo export and the published feed cannot drift apart on it — see redact.py.
     title, _ = redact_contacts(row["title"])
-    description, _ = redact_contacts(row["description"])
+    # Prose leaves only for sources whose licence covers it (sources.py). The
+    # database already stores none for the others; this is the second lock.
+    description = None
+    if sources.may_publish_description(row["source_slug"]):
+        description, _ = redact_contacts(row["description"])
+    own_image = _own_image(row)
     return {
         # Occurrence-unique. One event with several start times is several cards,
         # and this is the id a client addresses a single one of them by.
@@ -179,13 +214,13 @@ def _row_to_item(row) -> dict:
         # decorative stand-in. `image_url` is what a card shows, so the Commons
         # result is promoted into it rather than kept in a field every consumer
         # would have to know to fall back to.
-        "image_url": row["image_url"] or _stock_url(row, keys),
-        "image_attribution": _stock_attribution(row, keys) if not row["image_url"] else None,
+        "image_url": own_image or _stock_url(row, keys),
+        "image_attribution": _image_attribution(row, keys, own_image),
         # Decorative stand-in when we found nothing real — stable per event, varied
         # across events; UIs should treat it as decoration and may label it "stock"
-        "placeholder_url": None if (row["image_url"] or _stock_url(row, keys)) else placeholder_url(
+        "placeholder_url": None if (own_image or _stock_url(row, keys)) else placeholder_url(
             row["id"], row["category"], PLACEHOLDER_PROVIDER),
-        "description": description,  # open-licensed sources only (CC-BY), contacts stripped
+        "description": description,  # licensed sources only, contacts stripped
         "source": row["source_slug"],
         "source_url": row["source_url"],
         # true when the link is a raw data record, not a human page — UIs should label it
@@ -296,6 +331,10 @@ def build_feed(conn, city: str, items: list[dict], meta: dict) -> dict:
         "generated_at": meta["generated_at"],
         "window": meta["window"],
         "attribution": meta["attribution"],
+        # Licence and credit line per source in this feed, keyed by a row's
+        # `source`. Additive, so no version bump; a client should show the
+        # `attribution` of an event's source wherever it shows the event.
+        "sources": meta.get("sources", {}),
         "feed": {"url": f"feed.{feed_hash}.json.gz", "hash": feed_hash, "count": len(feed_rows)},
         "geo": {"url": f"geo.{geo_hash}.json.gz", "hash": geo_hash, "count": len(geo_rows)},
         "days": [{"date": d, "count": len(ids)} for d, ids in sorted(days.items())],
@@ -337,6 +376,47 @@ def _remove_superseded(city_dir: Path, built: dict) -> None:
             path.unlink()
 
 
+def _publishable(conn, city: str, rows: list, suppressions: Suppressions) -> tuple[list, dict]:
+    """Drop what may not be published: unpermitted sources, and takedowns.
+
+    The source check is the hard gate behind `sources.py` — the runner also
+    purges those events from the database, but an export must be right even
+    against a database nobody has purged. Returns the surviving rows and a
+    tally of what went, with the suppressed event ids for `publish`.
+    """
+    aliases: dict[str, list[str]] = {}
+    if len(suppressions):
+        for r in conn.execute(
+            "SELECT a.alias_id, a.canonical_id FROM event_aliases a "
+            "JOIN events e ON e.id = a.canonical_id WHERE e.city = ?", (city,),
+        ):
+            aliases.setdefault(r["canonical_id"], []).append(r["alias_id"])
+
+    kept = []
+    withheld: dict[str, int] = {}
+    suppressed: dict[str, str] = {}
+    for r in rows:
+        slug = r["source_slug"]
+        if not sources.is_permitted(slug):
+            withheld[slug] = withheld.get(slug, 0) + 1
+            continue
+        rule = suppressions.match(
+            event_ids=[r["id"], *aliases.get(r["id"], ())],
+            url=r["source_url"], venue=r["venue_name"], title=r["title"],
+        ) if len(suppressions) else None
+        if rule:
+            suppressed[r["id"]] = rule
+            continue
+        kept.append(r)
+    return kept, {"withheld": withheld, "suppressed": suppressed}
+
+
+def _attribution_line(credits: dict[str, dict]) -> str:
+    names = "; ".join(c["attribution"] for c in credits.values() if c.get("attribution"))
+    line = "Every item links to its original listing."
+    return f"{names}. {line}" if names else line
+
+
 def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
     today = date.today()
     date_from = today.isoformat()
@@ -352,6 +432,13 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
            ORDER BY o.starts_at_utc""",
         (city, date_from, date_to),
     ).fetchall()
+
+    rows, gate = _publishable(conn, city, rows, load_suppressions())
+    for slug, n in gate["withheld"].items():
+        log.warning("export: withheld %d row(s) from %s — source not permitted (sources.py)",
+                    n, slug)
+    if gate["suppressed"]:
+        log.info("export: %d event(s) withheld by suppressions.yaml", len(gate["suppressed"]))
 
     # Counted off the raw rows rather than tracked through _row_to_item, so the
     # number means "rows that arrived carrying contact details" — a source that
@@ -369,13 +456,15 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
 
     city_dir = Path(out_dir) / city
     city_dir.mkdir(parents=True, exist_ok=True)
+    credits = sources.credits(item["source"] for item in items)
     meta = {
         "city": city,
         "generated_at": now_iso(),
         "window": {"from": date_from, "to": date_to},
         "total": len(items),
         "by_category": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
-        "attribution": "Event data aggregated from public sources; every item links to its original listing.",
+        "attribution": _attribution_line(credits),
+        "sources": credits,
     }
     (city_dir / "index.json").write_text(
         json.dumps({"meta": meta, "events": items}, ensure_ascii=False, indent=1)
@@ -396,6 +485,8 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
         _write_json(city_dir / name, payload, gzipped=name.endswith(".gz"))
     # Last, so a reader never sees a manifest naming an object that isn't there yet.
     _write_json(city_dir / "manifest.json", built["manifest"], gzipped=False)
+    # Not a feed object and never uploaded: the ids `publish` must delete now.
+    (city_dir / TAKEDOWN_FILE).write_text(json.dumps(sorted(gate["suppressed"])))
 
     log.info(
         "exported %d occurrences (%d days) to %s — feed=%d listed, %d events, %d geo, "
@@ -411,4 +502,6 @@ def export_city(conn, city: str, out_dir: str | Path = "public") -> dict:
         "event_objects": len(built["events"]),
         "feed_hash": built["manifest"]["feed"]["hash"],
         "redacted": redacted,
+        "withheld_sources": gate["withheld"],
+        "suppressed": len(gate["suppressed"]),
     }

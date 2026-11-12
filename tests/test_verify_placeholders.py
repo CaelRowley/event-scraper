@@ -53,10 +53,10 @@ def test_export_emits_no_placeholder_url_at_all(tmp_path):
     tomorrow = (date.today() + timedelta(days=1)).isoformat()  # inside the export window
     occ = Occurrence(starts_at_utc=f"{tomorrow}T20:00:00Z",
                      starts_at_local=f"{tomorrow}T22:00:00+02:00", nightlife_date=tomorrow)
-    with_img = Event(id="", source="ra", source_event_id="1", source_url="https://x/1",
+    with_img = Event(id="", source="kulturdaten", source_event_id="1", source_url="https://x/1",
                      title="A", city="berlin", price=Price(), image_url="https://img/a.jpg",
                      occurrences=[occ])
-    without = Event(id="", source="ra", source_event_id="2", source_url="https://x/2",
+    without = Event(id="", source="kulturdaten", source_event_id="2", source_url="https://x/2",
                     title="B", city="berlin", price=Price(), occurrences=[occ])
     upsert_event(conn, with_img)
     upsert_event(conn, without)

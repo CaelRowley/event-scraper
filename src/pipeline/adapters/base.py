@@ -1,13 +1,16 @@
 """Adapter contract. One module per source; adapters yield RawEvents and never talk
-to the network except through the shared Fetcher (which owns rate limiting)."""
+to the network except through the shared Fetcher, which owns rate limiting, the
+robots.txt check and the User-Agent — an adapter can set none of the three aside.
+Whether a source runs at all is decided in `sources.py`, not here."""
 
 from __future__ import annotations
 
 import logging
 import re
 from collections.abc import Iterator
+from urllib.parse import urlsplit
 
-from ..fetch import DEFAULT_UA, Fetcher, RateSpec
+from ..fetch import Fetcher, RateSpec
 from ..models import RawEvent
 
 log = logging.getLogger(__name__)
@@ -27,11 +30,31 @@ def ensure_scheme(url: str | None) -> str | None:
     return url
 
 
+# Hosts whose URLs are data records, not pages a person can open.
+_RECORD_HOSTS = ("api-v2.kulturdaten.berlin",)
+
+
+def has_external_link(url: str | None) -> bool:
+    """Whether an event has somewhere to send a reader: an http(s) page that is
+    not a raw data record.
+
+    An event without one is not collected at all — not converted, not stored,
+    not snapshotted. The feed's promise is that every listing links to its
+    original, and an event we cannot link is one we have no business showing.
+    """
+    if not url:
+        return False
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or "." not in host:
+        return False
+    return not any(host == h or host.endswith("." + h) for h in _RECORD_HOSTS)
+
+
 class SourceAdapter:
     slug: str = ""
     category_prior: str | None = None  # vertical sources: every event gets this category
     rate: RateSpec = RateSpec()
-    user_agent: str = DEFAULT_UA
     cheap_delta: bool = False  # included in `--mode delta` (midday) runs
 
     def __init__(self, fetcher: Fetcher, conn):
@@ -49,7 +72,7 @@ class SourceAdapter:
     # --- helpers ---------------------------------------------------------------
 
     def get(self, url: str, **kw):
-        return self.fetcher.get(url, rate=self.rate, user_agent=self.user_agent, **kw)
+        return self.fetcher.get(url, rate=self.rate, **kw)
 
     def post(self, url: str, **kw):
-        return self.fetcher.post(url, rate=self.rate, user_agent=self.user_agent, **kw)
+        return self.fetcher.post(url, rate=self.rate, **kw)

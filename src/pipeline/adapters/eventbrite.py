@@ -1,4 +1,7 @@
-"""eventbrite.de — server-rendered `__SERVER_DATA__` blob on /d/ listing pages (verified).
+"""eventbrite.de — OFF (`sources.py`: stop). Eventbrite's Terms of Service § 13 forbid
+scraping and commercial use of site content; kept only as a record of the shape.
+
+Server-rendered `__SERVER_DATA__` blob on /d/ listing pages (verified).
 
 The public search API died in 2019; the robots-allowed path is the /d/ directory pages.
 The ~1 MB blob must be brace-matched (a lazy regex truncates it). Events live in
@@ -12,7 +15,7 @@ from collections.abc import Iterator
 from datetime import date, timedelta
 
 from ..extract.braces import extract_json_object
-from ..fetch import BROWSER_UA, RateSpec
+from ..fetch import RateSpec
 from ..models import RawEvent
 from .base import SourceAdapter
 
@@ -42,7 +45,6 @@ _ART_SUBCAT = ("fine art", "kunst", "design", "photograph", "sculpt", "paint")
 class EventbriteAdapter(SourceAdapter):
     slug = "eventbrite"
     rate = RateSpec(min_interval=3.0, jitter=(1.0, 2.5))
-    user_agent = BROWSER_UA
 
     def fetch_events(self, window_days: int = 14, limit: int | None = None) -> Iterator[RawEvent]:
         window_end = (date.today() + timedelta(days=window_days)).isoformat()

@@ -29,7 +29,7 @@ def r2(monkeypatch):
 
 def _ev(sid, title, img="http://i/x"):
     return Event(
-        id="", source="ra", source_event_id=sid, source_url=f"https://ra.example/{sid}",
+        id="", source="kulturdaten", source_event_id=sid, source_url=f"https://kd.example/{sid}",
         title=title, city="berlin", venue_name="V", price=Price(), image_url=img,
         occurrences=[Occurrence(starts_at_utc=f"{DAY}T20:00:00Z",
                                 starts_at_local=f"{DAY}T20:00:00+02:00", nightlife_date=DAY)],

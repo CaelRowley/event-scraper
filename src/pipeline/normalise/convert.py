@@ -32,7 +32,14 @@ def _schema_enum(value: str | None, table: dict, default: str) -> str:
 
 
 def to_event(raw: RawEvent, city: str, tz_name: str = "Europe/Berlin") -> Event | None:
-    """Returns None when the event has no parseable start — unusable for a dated feed."""
+    """Returns None when the event has no external link or no parseable start —
+    either way it is not stored. The link test is first: it is the cheapest, and
+    nothing about a linkless event is worth working out."""
+    from ..adapters.base import has_external_link
+
+    if not has_external_link(raw.source_url):
+        log.debug("dropping %s %s — no external link", raw.source, raw.source_event_id)
+        return None
     status = _schema_enum(raw.event_status, _STATUS_MAP, raw.event_status or "scheduled")
     mode = _schema_enum(raw.attendance_mode, _MODE_MAP, raw.attendance_mode or "offline")
 
@@ -74,6 +81,7 @@ def to_event(raw: RawEvent, city: str, tz_name: str = "Europe/Berlin") -> Event 
         lon=raw.lon,
         price=price,
         image_url=raw.image_url,
+        image_credit=(raw.image_credit or "").strip() or None,
         occurrences=occurrences,
         description=(raw.description or "")[:2000] or None,
         description_public=raw.description_public,
