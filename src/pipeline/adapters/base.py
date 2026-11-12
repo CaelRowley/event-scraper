@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterator
+from urllib.parse import urlsplit
 
 from ..fetch import Fetcher, RateSpec
 from ..models import RawEvent
@@ -27,6 +28,27 @@ def ensure_scheme(url: str | None) -> str | None:
     if re.match(r"^[\w-]+(\.[\w-]+)+([/?#]|$)", url):
         return f"https://{url}"
     return url
+
+
+# Hosts whose URLs are data records, not pages a person can open.
+_RECORD_HOSTS = ("api-v2.kulturdaten.berlin",)
+
+
+def has_external_link(url: str | None) -> bool:
+    """Whether an event has somewhere to send a reader: an http(s) page that is
+    not a raw data record.
+
+    An event without one is not collected at all — not converted, not stored,
+    not snapshotted. The feed's promise is that every listing links to its
+    original, and an event we cannot link is one we have no business showing.
+    """
+    if not url:
+        return False
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or "." not in host:
+        return False
+    return not any(host == h or host.endswith("." + h) for h in _RECORD_HOSTS)
 
 
 class SourceAdapter:

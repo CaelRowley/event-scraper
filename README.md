@@ -36,6 +36,7 @@ anything, what it already stored is purged, and none of it is exported.
 |---|---|---|---|
 | kulturdaten.berlin | open-data API | **on** | facts, description, link; credited (no formal data licence is published — confirmation requested) |
 | berlin.de markets & festivals | open-data JSON (`cc-by`) | **on** | facts, opening times/remarks, link; credited |
+| Berliner Volkshochschulen | open-data JSON (`cc-by`) | **on** | courses starting in the window: facts, description, price, booking link; credited. No contact persons or teachers |
 | Ticketmaster | Discovery API (key) | **on** | facts, image with its credit, link to the Ticketmaster page; no description |
 | Prinzipal Kreuzberg | venue's public Events Calendar API | **on** | facts, image, link; no description |
 | ra.co | undocumented GraphQL | off — needs RA's written agreement | — |
@@ -44,6 +45,14 @@ anything, what it already stored is purged, and none of it is exported.
 | comedyinenglish.de, comedycafeberlin.com | Events Calendar API | off — refused the collector; ask first | — |
 | rausgegangen.de | sitemap + JSON-LD | off — robots.txt and terms forbid it | — |
 | eventbrite.de | listing-page data blob | off — terms forbid it | — |
+
+**Only events with an external link.** An event with no page to send a reader
+to — no URL, something that is not a URL, or a raw API record — is skipped
+before it is converted: not stored, not snapshotted, not exported
+(`has_external_link`). kulturdaten events without a calendar page or website are
+dropped before their location is even looked up, and rows earlier runs stored
+without a link are deleted on the next run. Telemetry reports both under
+`policy.no_link_skipped` and `policy.no_link_deleted`.
 
 A source comes back when its site has agreed in writing: name its slug in
 `PIPELINE_PERMITTED_SOURCES` (the `PERMITTED_SOURCES` repository variable in CI).
@@ -283,8 +292,11 @@ robots-checked, ~150 pages/run) and the best image is pulled from JSON-LD →
 `og:image`/`twitter:image` → largest content `<img>` inside `article`/`main`
 (logo/icon/SVG names rejected, sub-200px images rejected). A found image is applied
 to every event sharing that URL (recurring exhibitions), so coverage compounds across
-runs. Images are hotlinked, never copied; a photo credit is published where the
-source supplies one (Ticketmaster's `attribution`).
+runs. Images are hotlinked, never copied. A photo credit is published as
+`image_attribution.author` where the source supplies one: Ticketmaster's
+`attribution`, and the credit line berlin.de's calendar prints under each photo
+(`p.image__copyright`). Images stored before credits were read are revisited
+once each, 100 pages a run, until they have caught up.
 
 ### Dead-link removal
 

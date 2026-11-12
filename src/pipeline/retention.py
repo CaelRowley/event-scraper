@@ -123,6 +123,28 @@ def purge_unpermitted(conn, city: str) -> dict:
     return {"sources": removed, "events": sum(removed.values())}
 
 
+def prune_linkless(conn, city: str) -> dict:
+    """Delete stored events that have no external link.
+
+    Nothing without one is stored any more (`has_external_link`, applied before
+    an event is converted); this removes what earlier runs kept — rows whose
+    link was empty, not a URL, or a raw kulturdaten API record.
+    """
+    from .adapters.base import has_external_link
+
+    rows = [
+        r for r in conn.execute(
+            "SELECT id, source_slug, source_event_id, source_url FROM events WHERE city=?", (city,))
+        if not has_external_link(r["source_url"])
+    ]
+    if rows:
+        _delete_events(conn, rows)
+        conn.execute(
+            "UPDATE events SET canonical_id=id WHERE canonical_id NOT IN (SELECT id FROM events)")
+        log.warning("policy: deleted %d stored event(s) with no external link", len(rows))
+    return {"events": len(rows)}
+
+
 def prune_past(conn, city: str, *, keep_days: int = RETAIN_PAST_DAYS,
                today: date | None = None) -> dict:
     """Remove finished events for `city`. Returns what it deleted."""

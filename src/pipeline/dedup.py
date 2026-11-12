@@ -28,7 +28,7 @@ START_DELTA_SECONDS = 15 * 60
 
 # Source priority for cluster head: structured API > JSON-LD > HTML.
 SOURCE_PRIORITY = {
-    "kulturdaten": 0, "ra": 1, "ticketmaster": 2, "berlin_de": 3, "askapunk": 4,
+    "kulturdaten": 0, "ra": 1, "ticketmaster": 2, "berlin_de": 3, "vhs": 4,
     "eventbrite": 5, "livegigs": 6, "rausgegangen": 7, "tip_berlin": 8, "gratis_berlin": 9,
 }
 

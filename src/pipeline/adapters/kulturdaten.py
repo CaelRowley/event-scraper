@@ -24,7 +24,7 @@ from datetime import date, timedelta
 
 from ..fetch import RateSpec
 from ..models import RawEvent
-from .base import SourceAdapter, ensure_scheme
+from .base import SourceAdapter, ensure_scheme, has_external_link
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +171,14 @@ class KulturdatenAdapter(SourceAdapter):
         venue_name = self._label(locations[0]) if locations else None
 
         attr = self._cached("kd_attractions", attractions[0].get("referenceId", ""), "attractions", "attraction") or {}
+        # The berlin.de calendar page first: it is event-specific, usually carries
+        # a photo and links out to the organiser. The attraction's own website is
+        # often just the venue's homepage. With neither, the event has no page to
+        # link to and is skipped here — before its location is even looked up.
+        external = next((l.get("url") for l in attr.get("externalLinks") or [] if l.get("url")), None)
+        source_url = calendar_url(attr) or ensure_scheme(attr.get("website")) or ensure_scheme(external)
+        if not has_external_link(source_url):
+            return None
         loc = self._cached("kd_locations", locations[0].get("referenceId", ""), "locations", "location") if locations else None
         loc = loc or {}
         address = loc.get("address", {})
@@ -195,15 +203,10 @@ class KulturdatenAdapter(SourceAdapter):
         if entry.get("scheduleStatus") == "event.cancelled":
             status = "cancelled"
 
-        external = next((l.get("url") for l in attr.get("externalLinks") or [] if l.get("url")), None)
         return RawEvent(
             source=self.slug,
             source_event_id=ident,
-            # The berlin.de calendar page first: it is event-specific, usually carries
-            # a photo and links out to the organiser. The attraction's own website is
-            # often just the venue's homepage. The raw API record only as last resort.
-            source_url=calendar_url(attr) or ensure_scheme(attr.get("website"))
-            or ensure_scheme(external) or f"{API}/events/{ident}",
+            source_url=source_url,
             title=title,
             start=start,
             end=end,
@@ -217,7 +220,7 @@ class KulturdatenAdapter(SourceAdapter):
             description=(attr.get("description", {}) or {}).get("de"),
             description_public=True,  # open data, credited — see sources.py
             event_status=status,
-            payload={"event": entry, "description": (attr.get("description", {}) or {}).get("de", "")[:1500]},
+            payload={"event": entry},  # the runner adds the description, contacts stripped
         )
 
     @staticmethod

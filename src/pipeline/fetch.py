@@ -147,8 +147,13 @@ class Fetcher:
                 timeout=30.0,
                 follow_redirects=True,
             )
+            # Same identity, no cache: for the rare body too large to be worth
+            # keeping (`cache=False`). Everything else about a request is unchanged.
+            self._uncached: httpx.Client | None = httpx.Client(
+                headers=headers, timeout=30.0, follow_redirects=True)
         else:
             self.client = httpx.Client(headers=headers, timeout=30.0, follow_redirects=True)
+            self._uncached = None
         self._last_request: dict[str, float] = {}
         # _robots is unlocked by choice: a race costs at most one duplicate robots.txt GET
         self._robots: dict[str, object] = {}
@@ -278,11 +283,17 @@ class Fetcher:
         reraise=True,
     )
     def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
-        deadline = time.monotonic() + MAX_RESPONSE_SECONDS
+        # A caller may raise the size cap for a dataset it knows to be large (and
+        # gets a proportionally longer clock); it cannot remove either.
+        max_bytes = kwargs.pop("max_bytes", None) or MAX_RESPONSE_BYTES
+        cached = kwargs.pop("cache", True)
+        client = self.client if cached or self._uncached is None else self._uncached
+        seconds = MAX_RESPONSE_SECONDS * max(1.0, max_bytes / MAX_RESPONSE_BYTES)
+        deadline = time.monotonic() + seconds
         host = urlsplit(url).netloc
         kwargs["headers"] = dict(kwargs.get("headers") or {})
-        request = self.client.build_request(method, url, **kwargs)
-        resp = self.client.send(request, stream=True)
+        request = client.build_request(method, url, **kwargs)
+        resp = client.send(request, stream=True)
         with self._counter_lock:
             self.requests_made += 1
             self._source_http[threading.current_thread().name][
@@ -292,8 +303,8 @@ class Fetcher:
         try:
             for chunk in resp.iter_bytes():
                 buf += chunk
-                if time.monotonic() > deadline or len(buf) > MAX_RESPONSE_BYTES:
-                    elapsed = time.monotonic() - (deadline - MAX_RESPONSE_SECONDS)
+                if time.monotonic() > deadline or len(buf) > max_bytes:
+                    elapsed = time.monotonic() - (deadline - seconds)
                     log.warning("fetch stalled after %.0fs / %d bytes — aborting: %s",
                                 elapsed, len(buf), url)
                     raise FetchStallError(url)
@@ -338,3 +349,5 @@ class Fetcher:
 
     def close(self) -> None:
         self.client.close()
+        if self._uncached is not None:
+            self._uncached.close()

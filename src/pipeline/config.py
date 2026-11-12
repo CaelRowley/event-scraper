@@ -30,11 +30,12 @@ CITIES = {
         # Every source the city has an adapter for. Which of them actually run
         # is not decided here: `sources.py` holds each one's verdict, and only a
         # permitted source is selected (see select_adapters). Today that is
-        # kulturdaten, berlin_de, prinzipal and ticketmaster; the rest wait for
+        # kulturdaten, berlin_de, vhs, prinzipal and ticketmaster; the rest wait for
         # their site's written permission and PIPELINE_PERMITTED_SOURCES.
         sources=[
             "kulturdaten",
             "berlin_de",
+            "vhs",
             "prinzipal",
             "ticketmaster",
             "ra",
@@ -66,6 +67,7 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
     from .adapters.livegigs import LivegigsAdapter
     from .adapters.ra import ResidentAdvisorAdapter
     from .adapters.ticketmaster import TicketmasterAdapter
+    from .adapters.vhs import VhsAdapter
     from .adapters.tribe import (
         ComedyCafeAdapter,
         ComedyInEnglishAdapter,
@@ -75,6 +77,7 @@ def select_adapters(city: CityConfig, *, mode: str = "full",
     registry = {
         "kulturdaten": KulturdatenAdapter,
         "berlin_de": BerlinDeAdapter,
+        "vhs": VhsAdapter,
         "ra": ResidentAdvisorAdapter,
         "livegigs": LivegigsAdapter,
         "rausgegangen": RausgegangenAdapter,

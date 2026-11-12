@@ -39,7 +39,8 @@ SKIP_HOSTS = ("ra.co", "api-v2.kulturdaten.berlin")
 # Same reasoning by source rather than host: kulturdaten events now link to the
 # berlin.de calendar page it imports from, and the adapter's full re-page every
 # run is still the liveness signal — retention and reconcile drop what vanished.
-LISTING_SOURCES = ("kulturdaten", "ra")
+# vhs: one file lists every course, re-read each full run — the same signal.
+LISTING_SOURCES = ("kulturdaten", "ra", "vhs")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS link_checks(

@@ -49,7 +49,7 @@ def _no_ambient_flags(monkeypatch, tmp_path):
 # --- which sources run ---------------------------------------------------------
 
 def test_only_sources_with_a_clear_basis_are_on_by_default():
-    assert sources.permitted_slugs() == ["berlin_de", "kulturdaten", "prinzipal", "ticketmaster"]
+    assert sources.permitted_slugs() == ["berlin_de", "kulturdaten", "prinzipal", "ticketmaster", "vhs"]
     for slug in ("ra", "rausgegangen", "tip_berlin", "livegigs", "eventbrite",
                  "comedy_in_english", "comedy_cafe"):
         assert not sources.is_permitted(slug), slug
@@ -67,7 +67,7 @@ def test_an_unregistered_source_is_not_permitted():
 
 def test_unpermitted_sources_are_never_selected_even_when_named():
     slugs = [s for s, _ in cfg.select_adapters(cfg.CITIES["berlin"])]
-    assert slugs == ["kulturdaten", "berlin_de", "prinzipal", "ticketmaster"]
+    assert slugs == ["kulturdaten", "berlin_de", "vhs", "prinzipal", "ticketmaster"]
     assert cfg.select_adapters(cfg.CITIES["berlin"], only=["ra"]) == []
 
 

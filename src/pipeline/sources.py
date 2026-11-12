@@ -87,6 +87,22 @@ _POLICIES = (
         checked="2026-11-12",
     ),
     SourcePolicy(
+        slug="vhs",
+        name="Berliner Volkshochschulen",
+        homepage="https://www.berlin.de/vhs/",
+        status=ACTIVE,
+        reason="Berlin Open Data dataset 'Kurse der Berliner Volkshochschulen', "
+               "registered as cc-by and published for reuse as one JSON file. The "
+               "contact persons and teachers named in it are not collected.",
+        access="open-data JSON",
+        licence="CC BY",
+        licence_url="https://opendefinition.org/licenses/cc-by/",
+        terms_url="https://datenregister.berlin.de/api/3/action/package_show?id=kurse",
+        attribution="Servicezentrum der Berliner Volkshochschulen (Berlin Open Data, CC BY)",
+        description=True,
+        checked="2026-11-12",
+    ),
+    SourcePolicy(
         slug="ticketmaster",
         name="Ticketmaster",
         homepage="https://www.ticketmaster.de/",
