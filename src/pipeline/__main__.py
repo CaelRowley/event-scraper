@@ -42,6 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     p_purge.add_argument("--apply", action="store_true",
                          help="actually delete (default: list what would go)")
 
+    p_delisted = sub.add_parser(
+        "purge-delisted",
+        help="delete, now, every bucket object the published manifest does not name")
+    p_delisted.add_argument("--city", default="berlin")
+    p_delisted.add_argument("--apply", action="store_true",
+                            help="actually delete (default: count what would go)")
+
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
@@ -77,6 +84,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(audit(args.city, sample=None if args.all else DEFAULT_SAMPLE),
                          indent=2))
         return 0
+
+    if args.cmd == "purge-delisted":
+        from .purge_r2 import purge_delisted
+
+        result = purge_delisted(args.city, apply=args.apply)
+        print(json.dumps(result))
+        return 1 if result.get("refused") else 0
 
     if args.cmd == "purge-legacy":
         from .purge_r2 import purge_legacy

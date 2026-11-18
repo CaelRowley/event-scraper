@@ -230,6 +230,21 @@ still reachable in a published object. That last check runs the same
 `contains_contact` the export gate uses, so a disagreement between them is a bug,
 not a judgement call.
 
+**Forcing the cleanup.** `publish` deletes a de-listed object 48 hours after it
+left the manifest. When that wait is the wrong trade — a source was switched
+off, or text or photos are no longer published, and they must not stay
+downloadable — delete everything the published manifest does not name at once:
+
+```
+gh workflow run scrape.yml -f mode=full -f purge_delisted=true -R CaelRowley/event-scraper
+```
+
+That scrapes, publishes, then runs `python -m pipeline purge-delisted --city
+berlin --apply`. The command works out the live feed from the bucket itself
+(manifest → feed → one detail object per row) and refuses if that picture is
+not whole. Without `--apply` it only counts. Clients holding the previous
+manifest will 404 on what it named, so this is not for routine use.
+
 **Retiring the v1 generation (once).** The cutover renames every detail object, so
 the first v2 publish adds its objects beside the v1 ones rather than replacing
 them, and the bucket briefly doubles. `publish`'s prune guard used to compare the

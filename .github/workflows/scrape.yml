@@ -15,6 +15,10 @@ on:
         default: "full"
         type: choice
         options: [full, delta]
+      purge_delisted:
+        description: "after publishing, delete every bucket object the new manifest does not name, without the 48h grace"
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -145,6 +149,27 @@ jobs:
             ARGS="$ARGS --no-prune"
           fi
           python -m pipeline publish $ARGS
+
+      # Manual runs only, and only when asked for: removes at once what `publish`
+      # would remove 48 hours after de-listing. For content that must not stay
+      # downloadable (a source switched off, text or photos no longer published).
+      # Clients holding the previous manifest will 404 on what it named, so this
+      # is not for routine use. Skipped on a capped dev scrape, whose manifest
+      # names only part of the real feed.
+      - name: Purge de-listed objects
+        if: github.event.inputs.purge_delisted == 'true' && steps.publish.outcome == 'success'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SCRAPE_LIMIT: ${{ vars.SCRAPE_LIMIT }}
+        run: |
+          if [ "${SCRAPE_LIMIT:-0}" -gt 0 ] 2>/dev/null; then
+            echo "::warning::DEV MODE — not purging: this run's manifest names only part of the feed"
+            exit 0
+          fi
+          python -m pipeline purge-delisted --city berlin --apply
 
       # After publish, so it can fail the run without holding the feed back.
       # Red here means "look at this", not "the feed is stale".

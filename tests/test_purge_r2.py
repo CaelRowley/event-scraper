@@ -94,3 +94,88 @@ def test_without_credentials_it_skips(tmp_path, monkeypatch):
     for var in ("R2_ACCOUNT_ID", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
         monkeypatch.delenv(var, raising=False)
     assert purge_r2.purge_legacy("berlin")["skipped"] is True
+
+
+# --- purge-delisted: everything the published manifest does not name -------------
+
+def _published(tmp_path, titles=("A", "B")):
+    from pipeline import publish_r2
+    from pipeline.db import connect, upsert_event
+    from pipeline.export import export_city
+    from pipeline.models import Event, Occurrence, Price
+    from datetime import date
+    day = date.today().isoformat()
+    conn = connect(":memory:")
+    for i, title in enumerate(titles):
+        upsert_event(conn, Event(
+            id="", source="vhs", source_event_id=str(i), source_url=f"https://vhs.example/{i}",
+            title=title, city="berlin", venue_name="V", price=Price(),
+            occurrences=[Occurrence(starts_at_utc=f"{day}T20:00:00Z",
+                                    starts_at_local=f"{day}T21:00:00+01:00", nightlife_date=day)]))
+    conn.commit()
+    export_city(conn, "berlin", tmp_path)
+    publish_r2.publish("berlin", tmp_path)
+
+
+def _all_keys(s3):
+    return {o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET).get("Contents", [])}
+
+
+LEFTOVERS = {
+    "berlin/feed.0ld0ld00.json.gz",            # a feed from before a source was switched off
+    "berlin/geo.0ld0ld00.json.gz",
+    "berlin/events/evt_RA1.deadbeef.json.gz",  # its detail objects
+    "berlin/events/evt_RA2.deadbeef.json.gz",
+    "berlin/events/evt_V1.json",               # and a pre-v2 one
+}
+
+
+def test_purge_delisted_is_a_dry_run_unless_applied(r2, tmp_path):
+    from pipeline.purge_r2 import purge_delisted
+    _published(tmp_path)
+    for key in LEFTOVERS:
+        r2.put_object(Bucket=BUCKET, Key=key, Body=b"{}")
+    before = _all_keys(r2)
+    stats = purge_delisted("berlin")
+    assert stats["dry_run"] and stats["deleted"] == 0 and stats["delisted"] == len(LEFTOVERS)
+    assert stats["kinds"] == {"event_objects": 2, "legacy_event_objects": 1, "feeds": 1,
+                              "geo": 1, "other": 0}
+    assert _all_keys(r2) == before
+
+
+def test_purge_delisted_removes_exactly_what_the_manifest_does_not_name(r2, tmp_path):
+    from pipeline import publish_r2
+    from pipeline.purge_r2 import purge_delisted
+    _published(tmp_path)
+    live = _all_keys(r2) - {"berlin/.delisted.json"}
+    for key in LEFTOVERS:
+        r2.put_object(Bucket=BUCKET, Key=key, Body=b"{}")
+    publish_r2._save_ledger(r2, BUCKET, "berlin", {k: "2026-01-01T00:00:00Z" for k in LEFTOVERS})
+
+    stats = purge_delisted("berlin", apply=True)
+    assert stats["deleted"] == len(LEFTOVERS) and stats["live"] == len(live)
+    assert _all_keys(r2) == live | {"berlin/.delisted.json"}
+    assert publish_r2._load_ledger(r2, BUCKET, "berlin") == {}
+    # and the feed still resolves end to end afterwards
+    from pipeline.purge_r2 import _named_by_manifest
+    assert _named_by_manifest(r2, BUCKET, "berlin") <= _all_keys(r2)
+
+
+def test_purge_delisted_refuses_when_the_live_feed_is_not_whole(r2, tmp_path):
+    from pipeline.purge_r2 import purge_delisted
+    _published(tmp_path)
+    r2.put_object(Bucket=BUCKET, Key="berlin/events/evt_OLD.deadbeef.json.gz", Body=b"{}")
+    victim = next(k for k in _all_keys(r2) if "/events/" in k and "evt_OLD" not in k)
+    r2.delete_object(Bucket=BUCKET, Key=victim)   # a named object has gone missing
+    before = _all_keys(r2)
+    stats = purge_delisted("berlin", apply=True)
+    assert stats["deleted"] == 0 and "missing" in stats["refused"]
+    assert _all_keys(r2) == before
+
+
+def test_purge_delisted_refuses_without_a_readable_manifest(r2):
+    from pipeline.purge_r2 import purge_delisted
+    r2.put_object(Bucket=BUCKET, Key="berlin/events/evt_OLD.deadbeef.json.gz", Body=b"{}")
+    stats = purge_delisted("berlin", apply=True)
+    assert stats["deleted"] == 0 and stats["refused"]
+    assert _all_keys(r2) == {"berlin/events/evt_OLD.deadbeef.json.gz"}
