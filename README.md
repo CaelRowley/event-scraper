@@ -228,10 +228,14 @@ not a judgement call.
 
 **Retiring the v1 generation (once).** The cutover renames every detail object, so
 the first v2 publish adds its objects beside the v1 ones rather than replacing
-them, and the bucket briefly doubles. `publish`'s own pruning then refuses
-forever: it compares the export against the bucket, sees it holding under half,
-and reads that as a broken scrape. The guard is right to fire, so the old
-generation is retired by hand instead — after the first v2 publish, run
+them, and the bucket briefly doubles. `publish`'s prune guard used to compare the
+export against the bucket, saw it holding under half, read that as a broken
+scrape and refused — on every run from then on, so nothing de-listed was ever
+deleted (30,732 objects against 4,834 live by November 2026, among them the old
+feeds of sources that had been switched off). The guard now measures the new
+feed against the event count of the manifest it replaces, so a backlog cannot
+lock it: leftovers are stamped on the next run and deleted 48 hours later. To
+retire the old generation at once instead of waiting, run
 
 ```
 python -m pipeline purge-legacy --city berlin           # list what would go

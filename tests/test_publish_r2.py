@@ -259,6 +259,44 @@ def test_drastically_smaller_export_never_prunes(r2, tmp_path):
     conn.execute("DELETE FROM events WHERE title != 'E0'")
     export_city(conn, "berlin", tmp_path)
     stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["prune_skipped"] and "events against" in stats["prune_skipped"]
+    assert _ledger(r2) == {}, "a refused prune must not start anyone's grace clock"
+
+
+def test_a_backlog_of_delisted_objects_does_not_lock_the_prune(r2, tmp_path):
+    """The guard measures the feed against the last manifest, not the bucket.
+
+    Measured against the bucket, a backlog larger than the feed made every run
+    look like a halving: nothing was stamped, nothing deleted, and objects of
+    sources that had been switched off stayed downloadable for weeks.
+    """
+    from datetime import datetime, timedelta, timezone
+    _seed_and_export(tmp_path, ["A", "B"])
+    publish_r2.publish("berlin", tmp_path)
+    live = _keys(r2)
+    backlog = {f"berlin/events/evt_OLD{i}.deadbeef.json.gz" for i in range(40)}
+    backlog |= {"berlin/feed.0ld0ld00.json.gz", "berlin/events/evt_V1.json"}
+    for key in backlog:
+        r2.put_object(Bucket=BUCKET, Key=key, Body=b"{}")
+
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["prune_skipped"] is None
+    assert set(_ledger(r2)) == backlog, "every leftover starts its grace clock"
+    assert backlog <= _keys(r2), "and none is deleted before the window has passed"
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=publish_r2.GRACE_HOURS + 1)
+           ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    publish_r2._save_ledger(r2, BUCKET, "berlin", {k: old for k in backlog})
+    stats = publish_r2.publish("berlin", tmp_path)
+    assert stats["pruned"] == len(backlog)
+    assert _keys(r2) == live | {"berlin/.delisted.json"}
+
+
+def test_without_a_previous_manifest_the_bucket_is_the_yardstick(r2, tmp_path):
+    _seed_and_export(tmp_path, ["A"])
+    for i in range(40):
+        r2.put_object(Bucket=BUCKET, Key=f"berlin/events/evt_X{i}.deadbeef.json.gz", Body=b"{}")
+    stats = publish_r2.publish("berlin", tmp_path)
     assert stats["prune_skipped"] and "objects against" in stats["prune_skipped"]
 
 

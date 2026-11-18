@@ -124,7 +124,7 @@ jobs:
       # Publish the exported feed to Cloudflare R2 — the objects Gobento reads.
       # Runs only after the freshness gate above passes, so a zero/failed scrape
       # never reaches the bucket (and publish itself refuses to prune when the
-      # feed is empty or far smaller than what the bucket holds). Uploads are a
+      # feed is empty or under half the size of the last published one). Uploads are a
       # diff: content-addressed names mean a steady-state run ships only the
       # events that actually changed, plus feed and manifest.
       - name: Publish feed to R2

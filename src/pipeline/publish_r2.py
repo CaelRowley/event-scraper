@@ -25,8 +25,8 @@ and only keys that have been absent for the whole window are deleted. Measuring
 from upload time instead would delete a months-old object the moment it left
 the manifest, which is precisely the 404 the grace window exists to prevent.
 
-A run that looks like a failed scrape — an empty feed, or far fewer objects than
-the bucket holds — never prunes. The workflow's freshness gate is the first line
+A run that looks like a failed scrape — an empty feed, or one holding under half
+the events the last published manifest named — never prunes. The workflow's freshness gate is the first line
 of defence; this is the second.
 
 Env (skips with a log + exit 0 if unset, so local runs never fail):
@@ -58,9 +58,16 @@ MAX_WORKERS = 8
 # manifest will ask for an object that no longer exists.
 GRACE_HOURS = 48
 
-# Pruning is refused when the local export holds fewer than this fraction of the
-# objects already in the bucket. A healthy day changes a few hundred of ~6,400
-# objects; anything that halves the set is a broken scrape, not a quiet week.
+# Pruning is refused when the new feed holds fewer than this fraction of the
+# events the last published manifest named. A healthy day changes a few hundred
+# of several thousand events; anything that halves the feed is a broken scrape,
+# not a quiet week.
+#
+# The yardstick is the previous *manifest*, not the size of the bucket. Measured
+# against the bucket, the guard locks itself: any backlog of de-listed objects
+# larger than the feed (the v2 rename left one) makes every later run look like
+# a halving, nothing is ever stamped or deleted, and the backlog only grows —
+# which is how objects of sources that had been switched off stayed downloadable.
 MIN_KEEP_RATIO = 0.5
 
 # Cache lifetimes per object kind. The manifest is revalidated constantly and
@@ -203,6 +210,9 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     # is fixed and whose content changes every run.
     manifest_key = f"{city}/manifest.json"
     todo = [(k, p) for k, p in local.items() if k != manifest_key and k not in existing]
+    # Read before the new manifest replaces it: this is what the prune guard
+    # measures the new feed against.
+    previous_count = _published_feed_count(s3, bucket, manifest_key)
 
     uploaded = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="r2") as pool:
@@ -222,7 +232,8 @@ def publish(city: str, out_dir: str | Path | None = None, *, prune: bool = True)
     deleted = 0
     prune_skipped = None
     if prune:
-        prune_skipped = _unsafe_to_prune(manifest_path, len(local), len(existing))
+        prune_skipped = _unsafe_to_prune(manifest_path, len(local), len(existing),
+                                         previous_count)
         if prune_skipped:
             log.warning("refusing to prune %s: %s", city, prune_skipped)
         else:
@@ -266,14 +277,38 @@ def _delete_taken_down(s3, bucket: str, city: str, city_dir: Path,
     return len(doomed)
 
 
-def _unsafe_to_prune(manifest_path: Path, local_count: int, existing_count: int) -> str | None:
-    """Why this run must not delete anything, or None when it is safe to."""
+def _published_feed_count(s3, bucket: str, manifest_key: str) -> int | None:
+    """How many events the manifest currently in the bucket names; None if unknown."""
+    try:
+        body = s3.get_object(Bucket=bucket, Key=manifest_key)["Body"].read()
+        count = json.loads(body)["feed"]["count"]
+    except s3.exceptions.NoSuchKey:
+        return None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return count if isinstance(count, int) and count > 0 else None
+
+
+def _unsafe_to_prune(manifest_path: Path, local_count: int, existing_count: int,
+                     previous_count: int | None = None) -> str | None:
+    """Why this run must not delete anything, or None when it is safe to.
+
+    `previous_count` is the event count of the manifest this publish replaced.
+    When it is known, the new feed is measured against it. When it is not (a
+    first publish, an unreadable manifest), the bucket's object count is the
+    only yardstick left.
+    """
     try:
         count = json.loads(manifest_path.read_text())["feed"]["count"]
     except (ValueError, KeyError, TypeError):
         return "manifest has no feed count"
     if not count:
         return "the feed is empty"
+    if previous_count:
+        if count < previous_count * MIN_KEEP_RATIO:
+            return (f"feed holds {count} events against {previous_count} "
+                    "in the last published manifest")
+        return None
     if existing_count and local_count < existing_count * MIN_KEEP_RATIO:
         return f"export holds {local_count} objects against {existing_count} in the bucket"
     return None
