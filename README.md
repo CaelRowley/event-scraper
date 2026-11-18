@@ -28,17 +28,21 @@ were enough. Categories it assigned are kept until their event changes or ends.
 ## Sources (Berlin)
 
 Whether a source runs is decided in one place, `src/pipeline/sources.py`, from
-that site's own terms, licence and robots.txt (last read 2026-11-12). A source
+that site's own terms, licence and robots.txt (last read 2026-11-18). A source
 that is not permitted is not collected, its domains are not contacted by
 anything, what it already stored is purged, and none of it is exported.
 
+The default for a source that runs is **facts and a link**: title, date, venue,
+price, category and the URL of the original page. Its text or its pictures are
+kept and published only where a licence or the source's own terms grant that.
+
 | source | access | status | what is published |
 |---|---|---|---|
-| kulturdaten.berlin | open-data API | **on** | facts, description, link; credited (no formal data licence is published — confirmation requested) |
-| berlin.de markets & festivals | open-data JSON (`cc-by`) | **on** | facts, opening times/remarks, link; credited |
-| Berliner Volkshochschulen | open-data JSON (`cc-by`) | **on** | courses starting in the window: facts, description, price, booking link; credited. No contact persons or teachers |
-| Ticketmaster | Discovery API (key) | **on** | facts, image with its credit, link to the Ticketmaster page; no description |
-| Prinzipal Kreuzberg | venue's public Events Calendar API | **on** | facts, image, link; no description |
+| kulturdaten.berlin | open-data API | **on** | facts and the link to the berlin.de calendar page; credited. No description and no photo: no data licence is published, and both belong to the organisers. They come back when Technologiestiftung Berlin (text) and BerlinOnline (photos) agree in writing |
+| berlin.de markets & festivals | open-data JSON (`cc-by`) | **on** | facts, opening times/remarks, link; credited. No photo |
+| Berliner Volkshochschulen | open-data JSON (`cc-by`) | **on** | courses starting in the window: facts, description, price, booking link; credited. No contact persons or teachers, no photo |
+| Ticketmaster | Discovery API (key) | **on** | facts, the image the API returns with its credit, link to the Ticketmaster page; no description |
+| Prinzipal Kreuzberg | venue's public Events Calendar API | off — the venue was never asked | — |
 | ra.co | undocumented GraphQL | off — needs RA's written agreement | — |
 | tip-berlin.de | sitemap + JSON-LD | off — refuses the collector; data is licensed by Cine Marketing | — |
 | livegigs.de | JSON-LD in listing pages | off — refuses the collector | — |
@@ -290,7 +294,15 @@ to the ledger either, so it is retried next run rather than treated as seen.
 
 ### Image backfill
 
-Sources that don't ship images (kulturdaten, berlin.de, many JSON-LD pages) get a
+**Off for every current source.** Reading an event's page to find a photo is
+done only for a source whose policy covers its pictures (`SourcePolicy.images`),
+and today that is Ticketmaster alone, whose API already supplies them. For
+kulturdaten, berlin.de and VHS no page is read, photos stored by earlier runs
+are dropped on the next run (`strip_unpublishable`), and the feed carries no
+`image_url` — the client shows a labelled stock photo of the category instead.
+What follows describes the mechanism for when a rights holder agrees.
+
+Sources that don't ship images get a
 backfill pass each run: the event's source page is fetched once ever (ledger-tracked,
 robots-checked, ~150 pages/run) and the best image is pulled from JSON-LD →
 `og:image`/`twitter:image` → largest content `<img>` inside `article`/`main`
@@ -347,9 +359,14 @@ next to the code that acts on it (`sources.py`).
   URL on every request; robots.txt obeyed on every request; a refusal is never
   routed around.
 * **Only what we may republish.** Facts (title, date, venue, price) and a link
-  back for every event. Descriptions only for the sources whose licence covers
-  prose (`SourcePolicy.description`), gated once at storage and again at export.
-  Images are hotlinked, not re-hosted.
+  back for every event, and nothing else by default. Descriptions only for the
+  sources whose licence covers prose (`SourcePolicy.description`: the two CC BY
+  open datasets), gated once at storage and again at export. Images only where
+  the source's terms grant them (`SourcePolicy.images`: the Ticketmaster API),
+  hotlinked, not re-hosted. An invitation to reuse is not a licence, and a photo
+  on a public page is not ours to show: kulturdaten's text and the berlin.de
+  calendar photos stay off until their rights holders agree in writing. An
+  event with neither is still listed; the client gives it a stock photo.
 * **Credit travels with the data.** `manifest.sources` carries each source's
   name, licence, licence URL and credit line, keyed by a row's `source`;
   `manifest.attribution` is the same as one sentence. A client should show the
@@ -382,7 +399,9 @@ is public; entries that would expose the requester go in the
 
 ### Contact stripping
 
-Roughly one kulturdaten description in ten ends with a booking line carrying a real
+(kulturdaten's descriptions are not published at present — see Sources — so
+today this applies to the VHS and berlin.de texts; the figures below are from
+when kulturdaten's were.) Roughly one kulturdaten description in ten ends with a booking line carrying a real
 person's phone number or address — council staff, a named organiser, a private
 mobile. Permission to republish the text is not a basis for
 re-publishing someone's contact details at a new address, and the data is German, so

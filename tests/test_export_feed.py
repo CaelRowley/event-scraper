@@ -19,7 +19,7 @@ def _ev(sid, title, day, hour, *, desc=None, img=None, lat=None, lon=None, url=N
         for d, h in [(day, hour)] + [(day, x) for x in extra_hours]
     ]
     return Event(
-        id="", source="kulturdaten", source_event_id=sid, source_url=url or f"https://kd.example/{sid}",
+        id="", source="vhs", source_event_id=sid, source_url=url or f"https://vhs.example/{sid}",
         title=title, city="berlin", venue_name="V", lat=lat, lon=lon, price=Price(),
         description=desc, description_public=bool(desc), image_url=img, occurrences=occ,
     )
@@ -28,7 +28,8 @@ def _ev(sid, title, day, hour, *, desc=None, img=None, lat=None, lon=None, url=N
 def _seed():
     conn = connect(":memory:")
     upsert_event(conn, _ev("1", "Has Image", DAY1, 22, img="http://i/1", lat=52.5, lon=13.4))
-    upsert_event(conn, _ev("2", "Nothing To Show", DAY1, 20))
+    upsert_event(conn, _ev("2", "No Page To Link", DAY1, 20, url="not-a-link"))
+    upsert_event(conn, _ev("4", "Facts Only", DAY1, 19))
     upsert_event(conn, _ev("3", "Two Slots", DAY2, 18, img="http://i/3", extra_hours=(21,)))
     conn.commit()
     return conn
@@ -61,7 +62,7 @@ def test_unpresentable_rows_get_no_object_because_none_could_be_addressed():
     """A detail URL needs the `h` from a list row, and an unlisted event has none."""
     conn = _seed()
     built = _build(conn)
-    hidden = conn.execute("SELECT id FROM events WHERE title='Nothing To Show'").fetchone()["id"]
+    hidden = conn.execute("SELECT id FROM events WHERE title='No Page To Link'").fetchone()["id"]
     assert hidden not in {r["event_id"] for r in built["feed"][1]}
     assert not any(k.startswith(f"events/{hidden}.") for k in built["events"])
 
@@ -79,7 +80,14 @@ def test_day_and_category_counts_count_events_not_occurrences():
     built = _build(_seed())
     day2 = [d for d in built["manifest"]["days"] if d["date"] == DAY2][0]
     assert day2["count"] == 1, "two slots on one night is one card"
-    assert sum(c["count"] for c in built["manifest"]["categories"].values()) == 2
+    assert sum(c["count"] for c in built["manifest"]["categories"].values()) == 3
+
+
+def test_an_event_with_no_text_and_no_picture_is_still_listed():
+    """Facts and a link are a whole listing; the client supplies a stock photo."""
+    rows = _build(_seed())["feed"][1]
+    row = next(r for r in rows if r["title"] == "Facts Only")
+    assert row["image_url"] is None and row["source_url"].startswith("https://")
 
 
 def test_list_row_hash_addresses_an_existing_event_object():
@@ -169,8 +177,8 @@ def test_export_city_removes_superseded_hashed_objects(tmp_path: Path):
     manifest = json.loads((city / "manifest.json").read_text())
     assert [p.name for p in city.glob("feed.*.json.gz")] == [manifest["feed"]["url"]]
     names = sorted(p.name for p in (city / "events").glob("*.json.gz"))
-    # "Nothing To Show" is unlisted, so only the two presentable events have objects
-    assert len(names) == 2 and len({n.split(".")[0] for n in names}) == 2, \
+    # "No Page To Link" is unlisted, so only the three listable events have objects
+    assert len(names) == 3 and len({n.split(".")[0] for n in names}) == 3, \
         f"one object per listed event, no stale hashes: {names}"
 
 

@@ -189,17 +189,29 @@ def _scan(fetcher, url: str) -> tuple[int | None, str | None, str | None]:
 def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict:
     """Scan source pages of imageless feed-window events, soonest first.
     A found image is applied to every event sharing the URL; misses retry weekly."""
+    # Looking for a picture on an event's page is only worth a request — and
+    # only defensible — for a source whose pictures we may show (sources.py).
+    # For every other source no page is read at all.
+    allowed = _image_sources(conn, city)
+    if not allowed:
+        stats = {"candidates": 0, "scanned": 0, "found": 0, "events_updated": 0,
+                 "credits": {"due": 0, "visited": 0, "credited": 0},
+                 "skipped": "no source's policy covers images found on its pages"}
+        log.info("image backfill: %s", stats)
+        return stats
+    marks = ",".join("?" * len(allowed))
     propagated = _propagate_shared_urls(conn)
     conn.commit()
     today = datetime.now(timezone.utc).date().isoformat()
     rows = conn.execute(
-        """SELECT e.source_url, MIN(o.starts_at_utc) AS next_start
+        f"""SELECT e.source_url, MIN(o.starts_at_utc) AS next_start
            FROM events e JOIN occurrences o ON o.event_id = e.id
            WHERE e.city=? AND e.canonical_id=e.id AND o.nightlife_date >= ?
              AND (e.image_url IS NULL OR e.image_url='')
              AND e.source_url LIKE 'http%'
+             AND e.source_slug IN ({marks})
            GROUP BY e.source_url ORDER BY next_start""",
-        (city, today),
+        (city, today, *allowed),
     ).fetchall()
 
     stats = {"candidates": len(rows), "scanned": 0, "found": 0,
@@ -220,18 +232,30 @@ def backfill_images(conn, fetcher, city: str, budget: int = SCAN_BUDGET) -> dict
         if image:
             cur = conn.execute(
                 "UPDATE events SET image_url=?, image_credit=? WHERE source_url=? "
-                "AND (image_url IS NULL OR image_url='')",
-                (image, credit, url),
+                f"AND (image_url IS NULL OR image_url='') AND source_slug IN ({marks})",
+                (image, credit, url, *allowed),
             )
             stats["found"] += 1
             stats["events_updated"] += cur.rowcount
         conn.commit()  # per page — no write transaction spans the next result
-    stats["credits"] = _backfill_credits(conn, fetcher, city, today)
+    stats["credits"] = _backfill_credits(conn, fetcher, city, today, allowed)
     log.info("image backfill: %s", stats)
     return stats
 
 
-def _backfill_credits(conn, fetcher, city: str, today: str, budget: int = CREDIT_BUDGET) -> dict:
+def _image_sources(conn, city: str) -> list[str]:
+    """Sources with events in this city whose policy lets us show their pictures."""
+    from . import sources as policy
+
+    return sorted(
+        r["source_slug"] for r in conn.execute(
+            "SELECT DISTINCT source_slug FROM events WHERE city = ?", (city,))
+        if policy.is_permitted(r["source_slug"]) and policy.may_publish_images(r["source_slug"])
+    )
+
+
+def _backfill_credits(conn, fetcher, city: str, today: str, allowed: list[str],
+                      budget: int = CREDIT_BUDGET) -> dict:
     """Revisit pages whose image was found before credits were read.
 
     Each page is revisited once (ledger slug "imgcredit"). If it still shows the
@@ -239,18 +263,20 @@ def _backfill_credits(conn, fetcher, city: str, today: str, budget: int = CREDIT
     image and credit are replaced together, so a credit never sits beside a
     photo it does not belong to.
     """
+    marks = ",".join("?" * len(allowed))
     rows = conn.execute(
         """SELECT e.source_url, MIN(o.starts_at_utc) AS next_start
            FROM events e JOIN occurrences o ON o.event_id = e.id
            WHERE e.city=? AND e.canonical_id=e.id AND o.nightlife_date >= ?
              AND e.image_url LIKE 'http%' AND (e.image_credit IS NULL OR e.image_credit='')
              AND e.source_url LIKE 'http%'
+             AND e.source_slug IN ({marks})
              AND EXISTS (SELECT 1 FROM crawl_ledger l
                           WHERE l.source_slug='imgscan' AND l.url = e.source_url)
              AND NOT EXISTS (SELECT 1 FROM crawl_ledger l
                               WHERE l.source_slug='imgcredit' AND l.url = e.source_url)
-           GROUP BY e.source_url ORDER BY next_start""",
-        (city, today),
+           GROUP BY e.source_url ORDER BY next_start""".format(marks=marks),
+        (city, today, *allowed),
     ).fetchall()
     stats = {"due": len(rows), "visited": 0, "credited": 0}
     due = [r["source_url"] for r in rows
@@ -265,8 +291,8 @@ def _backfill_credits(conn, fetcher, city: str, today: str, budget: int = CREDIT
         if image and credit:
             cur = conn.execute(
                 "UPDATE events SET image_url=?, image_credit=? WHERE source_url=? "
-                "AND image_url IS NOT NULL AND image_url != ''",
-                (image, credit, url),
+                f"AND image_url IS NOT NULL AND image_url != '' AND source_slug IN ({marks})",
+                (image, credit, url, *allowed),
             )
             stats["credited"] += cur.rowcount
         conn.commit()

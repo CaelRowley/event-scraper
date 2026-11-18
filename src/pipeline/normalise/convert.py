@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import sources
 from ..models import Event, RawEvent
 from .dates import make_occurrence
 from .prices import parse_price
@@ -84,7 +85,10 @@ def to_event(raw: RawEvent, city: str, tz_name: str = "Europe/Berlin") -> Event 
         image_credit=(raw.image_credit or "").strip() or None,
         occurrences=occurrences,
         description=(raw.description or "")[:2000] or None,
-        description_public=raw.description_public,
+        # The adapter says the text is openly licensed; the source policy has the
+        # last word, so switching a source's prose off needs no adapter change.
+        description_public=(raw.description_public
+                            and sources.may_publish_description(raw.source)),
     )
     if sold_out:
         ev.tags.append("sold-out")

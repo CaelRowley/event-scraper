@@ -123,6 +123,38 @@ def purge_unpermitted(conn, city: str) -> dict:
     return {"sources": removed, "events": sum(removed.values())}
 
 
+def strip_unpublishable(conn, city: str) -> dict:
+    """Drop stored prose and pictures of sources whose policy no longer covers them.
+
+    New rows never carry them (`convert` gates prose, the image scan skips these
+    sources), and the export withholds them regardless. This clears what earlier
+    runs stored, so a description or a photo link we may not publish is not kept
+    either — and the image check stops probing photos nobody will be shown.
+    """
+    from . import sources as policy
+
+    slugs = [r["source_slug"] for r in conn.execute(
+        "SELECT DISTINCT source_slug FROM events WHERE city = ?", (city,))]
+    out = {"descriptions": 0, "images": 0, "snapshots": 0}
+    for slug in slugs:
+        if not policy.may_publish_description(slug):
+            out["descriptions"] += conn.execute(
+                "UPDATE events SET description=NULL WHERE city=? AND source_slug=? "
+                "AND description IS NOT NULL", (city, slug)).rowcount
+            out["snapshots"] += conn.execute(
+                "UPDATE raw_snapshots SET payload_json=json_set(payload_json,'$.description','') "
+                "WHERE source_slug=? AND json_valid(payload_json) "
+                "AND COALESCE(json_extract(payload_json,'$.description'),'') != ''",
+                (slug,)).rowcount
+        if not policy.may_publish_images(slug):
+            out["images"] += conn.execute(
+                "UPDATE events SET image_url=NULL, image_credit=NULL WHERE city=? "
+                "AND source_slug=? AND image_url IS NOT NULL", (city, slug)).rowcount
+    if any(out.values()):
+        log.warning("policy: stripped stored content the source policy does not cover: %s", out)
+    return out
+
+
 def prune_linkless(conn, city: str) -> dict:
     """Delete stored events that have no external link.
 

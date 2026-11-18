@@ -4,7 +4,8 @@ Licence, as read on 2026-11-12: the operator invites reuse ("frei und einfach
 zugänglich, z.B. um diese für eigene Anwendungen zu nutzen") but publishes no
 formal data licence for the API records; only the project README says "Text and
 content available as CC BY" (3.0 DE). Records are imports of berlin.de's district
-calendar. We credit both and carry the descriptions on that basis — see sources.py.
+calendar. An invitation is not a licence, so we list the facts with a link and
+a credit, and keep no description until the operator confirms one — see sources.py.
 
 Endpoint (verified 2026-06-10): GET https://api-v2.kulturdaten.berlin/api/events
   - ?startDate=YYYY-MM-DD filters to events starting on/after that date
@@ -218,7 +219,9 @@ class KulturdatenAdapter(SourceAdapter):
             is_free=is_free,
             category_raw=category_raw,
             description=(attr.get("description", {}) or {}).get("de"),
-            description_public=True,  # open data, credited — see sources.py
+            # Read for categorising only. Whether it is kept is the source
+            # policy's call (convert.py), and today it is not — see sources.py.
+            description_public=True,
             event_status=status,
             payload={"event": entry},  # the runner adds the description, contacts stripped
         )

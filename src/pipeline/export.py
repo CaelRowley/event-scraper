@@ -229,12 +229,16 @@ def _row_to_item(row) -> dict:
 
 
 def _is_presentable(item: dict) -> bool:
-    """An event with neither a description nor a picture has nothing to show.
+    """Whether an event can be listed: it needs a title and a page to send people to.
 
-    Such rows are hidden from every *listing* surface, but they still get a
-    per-event object: a deep link or an already-saved bookmark has to open.
+    Facts and a link are a complete listing. Most sources publish nothing else
+    (sources.py), and the client draws a labelled stock photo of the category
+    where an event has no picture of its own — so a missing description or
+    photo is no longer a reason to hide the event, as it was while every
+    source carried one or the other.
     """
-    return bool(item.get("description")) or bool(item.get("image_url"))
+    return bool((item.get("title") or "").strip()) and \
+        str(item.get("source_url") or "").startswith("http")
 
 
 def _list_row(item: dict, event_hash: str) -> dict:

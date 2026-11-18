@@ -49,9 +49,9 @@ def _no_ambient_flags(monkeypatch, tmp_path):
 # --- which sources run ---------------------------------------------------------
 
 def test_only_sources_with_a_clear_basis_are_on_by_default():
-    assert sources.permitted_slugs() == ["berlin_de", "kulturdaten", "prinzipal", "ticketmaster", "vhs"]
+    assert sources.permitted_slugs() == ["berlin_de", "kulturdaten", "ticketmaster", "vhs"]
     for slug in ("ra", "rausgegangen", "tip_berlin", "livegigs", "eventbrite",
-                 "comedy_in_english", "comedy_cafe"):
+                 "comedy_in_english", "comedy_cafe", "prinzipal"):
         assert not sources.is_permitted(slug), slug
         assert sources.policy(slug).reason, f"{slug} is off without a stated reason"
 
@@ -67,7 +67,7 @@ def test_an_unregistered_source_is_not_permitted():
 
 def test_unpermitted_sources_are_never_selected_even_when_named():
     slugs = [s for s, _ in cfg.select_adapters(cfg.CITIES["berlin"])]
-    assert slugs == ["kulturdaten", "berlin_de", "vhs", "prinzipal", "ticketmaster"]
+    assert slugs == ["kulturdaten", "berlin_de", "vhs", "ticketmaster"]
     assert cfg.select_adapters(cfg.CITIES["berlin"], only=["ra"]) == []
 
 
@@ -202,16 +202,58 @@ def test_a_permitted_source_comes_back_into_the_export(tmp_path, monkeypatch):
 
 def test_prose_is_published_only_for_sources_whose_licence_covers_it(tmp_path):
     conn = connect(":memory:")
-    upsert_event(conn, _ev("kulturdaten", "1", "Open", desc="Lesung im Kiez."))
+    upsert_event(conn, _ev("vhs", "1", "Kurs", desc="Kurs mit 3 Terminen."))
     upsert_event(conn, _ev("berlin_de", "2", "Markt", desc="Sa 10-18 Uhr"))
     # stored with a description on purpose: the export must still hold it back
     upsert_event(conn, _ev("ticketmaster", "3", "Arena Show", desc="Promoter's blurb."))
-    upsert_event(conn, _ev("prinzipal", "4", "Revue", desc="Venue's own text."))
+    upsert_event(conn, _ev("kulturdaten", "4", "Lesung", desc="Organiser's text."))
     _, events, _ = _export(conn, tmp_path)
-    assert events["Open"]["description"] == "Lesung im Kiez."
+    assert events["Kurs"]["description"] == "Kurs mit 3 Terminen."
     assert events["Markt"]["description"] == "Sa 10-18 Uhr"
     assert events["Arena Show"]["description"] is None
-    assert events["Revue"]["description"] is None
+    assert events["Lesung"]["description"] is None, "no licence is published for kulturdaten prose"
+
+
+def test_pictures_are_published_only_where_a_licence_or_terms_grant_them(tmp_path):
+    conn = connect(":memory:")
+    for slug in ("kulturdaten", "berlin_de", "vhs", "ticketmaster"):
+        upsert_event(conn, _ev(slug, "1", slug, credit="Someone"))
+    _, events, _ = _export(conn, tmp_path)
+    assert events["ticketmaster"]["image_url"] == "https://img.example/x.jpg"
+    for slug in ("kulturdaten", "berlin_de", "vhs"):
+        assert events[slug]["image_url"] is None, slug
+        assert events[slug]["image_attribution"] is None, slug
+        assert events[slug]["source_url"], "the listing itself, with its link, stays"
+
+
+def test_only_ticketmaster_grants_pictures_and_only_open_data_grants_prose():
+    assert [s for s in sources.POLICIES if sources.may_publish_images(s)] == ["ticketmaster"]
+    assert sorted(s for s in sources.POLICIES if sources.may_publish_description(s)) == \
+        ["berlin_de", "vhs"]
+
+
+def test_stored_prose_and_pictures_the_policy_does_not_cover_are_dropped():
+    from pipeline.retention import strip_unpublishable
+    conn = connect(":memory:")
+    upsert_event(conn, _ev("kulturdaten", "1", "Lesung", desc="Organiser's text."))
+    upsert_event(conn, _ev("vhs", "2", "Kurs", desc="Kurs mit 3 Terminen."))
+    upsert_event(conn, _ev("ticketmaster", "3", "Arena Show", credit="Jane Roe"))
+    for slug, sid in (("kulturdaten", "1"), ("vhs", "2")):
+        conn.execute(
+            "INSERT INTO raw_snapshots(source_slug, source_event_id, payload_json, fetched_at) "
+            "VALUES(?,?,?,'2026-01-01T00:00:00Z')",
+            (slug, sid, json.dumps({"event": {"id": sid}, "description": "kept text"})))
+    stats = strip_unpublishable(conn, "berlin")
+    assert stats == {"descriptions": 1, "images": 2, "snapshots": 1}
+    rows = {r["source_slug"]: r for r in conn.execute("SELECT * FROM events")}
+    assert rows["kulturdaten"]["description"] is None and rows["kulturdaten"]["image_url"] is None
+    assert rows["vhs"]["description"] == "Kurs mit 3 Terminen." and rows["vhs"]["image_url"] is None
+    assert rows["ticketmaster"]["image_url"] and rows["ticketmaster"]["image_credit"] == "Jane Roe"
+    snaps = {r["source_slug"]: json.loads(r["payload_json"])
+             for r in conn.execute("SELECT * FROM raw_snapshots")}
+    assert snaps["kulturdaten"] == {"event": {"id": "1"}, "description": ""}
+    assert snaps["vhs"]["description"] == "kept text"
+    assert strip_unpublishable(conn, "berlin") == {"descriptions": 0, "images": 0, "snapshots": 0}
 
 
 def test_the_manifest_carries_each_sources_licence_and_credit(tmp_path):

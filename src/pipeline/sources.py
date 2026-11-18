@@ -18,6 +18,14 @@ here is not permitted: an adapter added without a policy does not publish.
 The verdicts below come from reading each site's own terms, licence and
 robots.txt on the `checked` date. They are an operator's reading, not legal
 advice; `reason` says which clause decided it.
+
+The default is facts and a link: title, date, venue, price, category, and the
+URL of the original page. A source's prose (`description`) or pictures
+(`images`) are kept and published only where a licence or the source's own
+terms grant that — open data under CC BY for text, the Ticketmaster API terms
+for its images. "The operator seems happy for people to reuse it" is not a
+licence, and neither is a photo being reachable on a public page, so both stay
+off until the rights holder says yes in writing.
 """
 
 from __future__ import annotations
@@ -45,8 +53,8 @@ class SourcePolicy:
     licence_url: str | None = None
     terms_url: str | None = None    # the document the verdict was read from
     attribution: str = ""           # credit line a client should display
-    description: bool = False       # may its prose be republished
-    images: bool = True             # may its images be shown (hotlinked, never re-hosted)
+    description: bool = False       # may its prose be kept and republished
+    images: bool = False            # may its images be shown (hotlinked, never re-hosted)
     checked: str = ""               # date the terms were last read
 
 
@@ -56,18 +64,21 @@ _POLICIES = (
         name="kulturdaten.berlin",
         homepage="https://www.kulturdaten.berlin/",
         status=ACTIVE,
-        reason="Public open-data API whose operator invites reuse in other applications. "
-               "No formal data licence is published for the API records (the project "
-               "README states CC BY 3.0 DE for text and content); written confirmation "
-               "has been requested.",
+        reason="Public open-data API whose operator invites reuse in other applications, "
+               "so the facts are listed with a link to the berlin.de calendar page. No "
+               "data licence is published for the API records, and the descriptions and "
+               "calendar photos belong to the organisers: neither is kept or published "
+               "until Technologiestiftung Berlin (text) and BerlinOnline (photos) "
+               "confirm in writing.",
         domains=("kulturdaten.berlin",),
         access="open-data API (keyless)",
         licence=None,
         terms_url="https://www.kulturdaten.berlin/",
         attribution="Event data: kulturdaten.berlin (Technologiestiftung Berlin), "
                     "from the berlin.de district event calendar",
-        description=True,
-        checked="2026-11-12",
+        description=False,
+        images=False,
+        checked="2026-11-18",
     ),
     SourcePolicy(
         slug="berlin_de",
@@ -108,28 +119,30 @@ _POLICIES = (
         homepage="https://www.ticketmaster.de/",
         status=ACTIVE,
         reason="Official Discovery API under the Developer Terms of Use: event content "
-               "cached only as long as needed, removed within 24 hours on request, "
-               "every event linked to its Ticketmaster page.",
+               "and the images the API returns, cached only as long as needed, removed "
+               "within 24 hours on request, every event linked to its Ticketmaster page.",
         access="Discovery API (key)",
         licence="Ticketmaster Developer Terms of Use",
         terms_url="https://developer.ticketmaster.com/support/terms-of-use/",
         attribution="Event data and images: Ticketmaster",
         description=False,
-        checked="2026-11-12",
+        images=True,
+        checked="2026-11-18",
     ),
     SourcePolicy(
         slug="prinzipal",
         name="Prinzipal Kreuzberg",
         homepage="https://prinzipal-kreuzberg.com/",
-        status=ACTIVE,
+        status=NEEDS_PERMISSION,
         reason="The venue's own public Events Calendar REST endpoint; robots.txt allows "
-               "it and the site has no terms on automated access. Facts and a link only.",
+               "it and the site has no terms on automated access, but the venue was "
+               "never asked. Off until it agrees.",
         domains=("prinzipal-kreuzberg.com",),
         access="public Events Calendar REST API",
         terms_url="https://prinzipal-kreuzberg.com/robots.txt",
         attribution="Prinzipal Kreuzberg",
         description=False,
-        checked="2026-11-12",
+        checked="2026-11-18",
     ),
     SourcePolicy(
         slug="ra",

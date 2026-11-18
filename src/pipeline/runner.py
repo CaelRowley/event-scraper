@@ -30,7 +30,7 @@ from .db import connect, reconcile_occurrences, set_category, snapshot, upsert_e
 from .dedup import run_dedup
 from .export import export_city
 from .redact import redact_contacts
-from .retention import prune_linkless, prune_past, purge_unpermitted
+from .retention import prune_linkless, prune_past, purge_unpermitted, strip_unpublishable
 from .adapters.base import has_external_link
 from .fetch import Fetcher, HostBlockedError
 from .images import backfill_images
@@ -91,10 +91,11 @@ def _run_adapter(slug: str, adapter_cls: type, city: cfg.CityConfig, db_path: st
             res.count += 1
             if changed:
                 # Contact details are stripped before the text is kept, not only
-                # before it is published: nothing here needs a phone number.
+                # before it is published: nothing here needs a phone number. A
+                # source whose prose we may not publish has none kept here either.
+                kept = redact_contacts(ev.description)[0] if ev.description_public else None
                 snapshot(conn, ev.source, ev.source_event_id,
-                         {**raw.payload,
-                          "description": (redact_contacts(ev.description)[0] or "")[:1500]})
+                         {**raw.payload, "description": (kept or "")[:1500]})
             if cls is None:
                 res.tier_counts["unclassified"] += 1  # zero signal — stays "other"
             else:
@@ -195,6 +196,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
     # Before dedup: what a switched-off source left behind goes now, not when it
     # ages out, and clusters it headed re-form around the members that remain.
     purge_stats = purge_unpermitted(conn, city.slug)
+    stripped_stats = strip_unpublishable(conn, city.slug)
     linkless_stats = prune_linkless(conn, city.slug)
     conn.commit()
 
@@ -255,6 +257,7 @@ def run(city_slug: str = "berlin", *, mode: str = "full", only: list[str] | None
         # What policy kept out of this run: sources waiting for permission, and
         # what was deleted of theirs. Takedowns are counted under `export`.
         "policy": {"withheld_sources": policy.unpermitted_slugs(), "purged": purge_stats,
+                   "stripped": stripped_stats,
                    # Events with no external link: skipped at the door this run,
                    # and deleted where an earlier run had stored them.
                    "no_link_skipped": no_link, "no_link_deleted": linkless_stats["events"]},

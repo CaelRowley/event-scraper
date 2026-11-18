@@ -30,8 +30,8 @@ def r2(monkeypatch):
 def _publish(tmp_path, description, title="Lesung im Garten"):
     conn = connect(":memory:")
     upsert_event(conn, Event(
-        id="", source="kulturdaten", source_event_id="E_1",
-        source_url="https://api-v2.kulturdaten.berlin/api/events/E_1",
+        id="", source="vhs", source_event_id="E_1",
+        source_url="https://www.vhsit.berlin.de/VHSKURSE/BusinessPages/CourseDetail.aspx?id=1",
         title=title, city="berlin", venue_name="Bibliothek", price=Price(),
         description=description, description_public=True, image_url="http://i/1",
         occurrences=[Occurrence(starts_at_utc=f"{DAY}T18:00:00Z",

@@ -55,15 +55,20 @@ def test_description_only_stored_for_open_licensed_sources():
     from pipeline.db import connect, upsert_event
 
     conn = connect(":memory:")
-    open_raw = RawEvent(source="kd", source_event_id="1", source_url="https://kd.example/1", title="A",
+    open_raw = RawEvent(source="vhs", source_event_id="1", source_url="https://vhs.example/1", title="A",
                         start="2026-06-14", description="CC-BY text", description_public=True)
     closed_raw = RawEvent(source="tip", source_event_id="2", source_url="https://tip.example/2", title="B",
                           start="2026-06-14", description="editorial text")
-    for raw in (open_raw, closed_raw):
+    # The adapter's flag is not enough on its own: the source policy has to
+    # cover prose too, and for kulturdaten no licence says it does.
+    unconfirmed = RawEvent(source="kulturdaten", source_event_id="3", source_url="https://kd.example/3",
+                           title="C", start="2026-06-14", description="organiser's text",
+                           description_public=True)
+    for raw in (open_raw, closed_raw, unconfirmed):
         upsert_event(conn, to_event(raw, "berlin"))
     rows = {r["source_slug"]: r["description"]
             for r in conn.execute("SELECT source_slug, description FROM events")}
-    assert rows == {"kd": "CC-BY text", "tip": None}
+    assert rows == {"vhs": "CC-BY text", "tip": None, "kulturdaten": None}
 
 
 def test_source_url_change_updates_link_without_marking_event_changed():

@@ -156,9 +156,26 @@ class _PageFetcher:
 
 
 import httpx  # noqa: E402
+import pytest  # noqa: E402
 
 
-def test_a_new_scan_stores_the_image_and_its_credit_together():
+@pytest.fixture
+def photos_granted(monkeypatch):
+    """As if kulturdaten's photo holder had agreed (sources.py: images=True)."""
+    monkeypatch.setattr("pipeline.sources.may_publish_images", lambda slug: True)
+
+
+def test_no_page_is_read_for_a_source_whose_pictures_we_may_not_show():
+    from pipeline.images import backfill_images
+    conn, url = _credit_db(None)
+    fetcher = _PageFetcher(CAL_PAGE)
+    stats = backfill_images(conn, fetcher, "berlin")
+    assert fetcher.calls == [], "kulturdaten's policy does not cover photos"
+    assert stats["scanned"] == 0 and stats["skipped"]
+    assert conn.execute("SELECT image_url FROM events").fetchone()[0] is None
+
+
+def test_a_new_scan_stores_the_image_and_its_credit_together(photos_granted):
     from pipeline.images import backfill_images
     conn, url = _credit_db(None)
     stats = backfill_images(conn, _PageFetcher(CAL_PAGE), "berlin")
@@ -168,7 +185,7 @@ def test_a_new_scan_stores_the_image_and_its_credit_together():
     assert stats["found"] == 1 and stats["credits"]["due"] == 0
 
 
-def test_an_image_stored_without_a_credit_gets_one_on_a_single_revisit():
+def test_an_image_stored_without_a_credit_gets_one_on_a_single_revisit(photos_granted):
     from pipeline.images import backfill_images
     conn, url = _credit_db("https://www.berlin.de/land/kalender/data/281641-1.jpg")
     fetcher = _PageFetcher(CAL_PAGE)
@@ -179,7 +196,7 @@ def test_an_image_stored_without_a_credit_gets_one_on_a_single_revisit():
     assert fetcher.calls == [url], "the page is revisited once, not on every run"
 
 
-def test_a_page_without_a_credit_is_not_revisited_forever():
+def test_a_page_without_a_credit_is_not_revisited_forever(photos_granted):
     from pipeline.images import backfill_images
     conn, url = _credit_db("https://www.berlin.de/land/kalender/data/281641-1.jpg")
     fetcher = _PageFetcher(CAL_PAGE.replace("image__copyright", "image__other"))
